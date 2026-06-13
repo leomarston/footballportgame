@@ -1,17 +1,28 @@
 /* GOALSTORM — player.js
- * Procedural toon-shaded footballer: jointed skeleton with run / idle /
- * kick / slide / celebrate animation, per-team kit materials, jersey
- * number, soft contact shadow. Movement physics + ball-dribble logic.
+ * Articulated toon footballer with a hand-authored run cycle.
+ *
+ * Skeleton (every joint is a pivot Group so rotations happen at the joint):
+ *   root(yaw=facing) -> hips(pelvis: bob/lean/roll/yaw)
+ *     -> spine(chest: counter-yaw + forward lean)
+ *          -> neck -> headPivot(head, hair, face)
+ *          -> shoulderL/R -> elbowL/R -> hand
+ *     -> hipL/R -> kneeL/R -> ankleL/R -> foot
+ *
+ * The run cycle is built from per-joint keyframe tables (contralateral arm/leg
+ * swing, hip drop, pelvis + spine counter-rotation, knee flexion, ankle roll,
+ * cadence locked to ground speed to kill foot-sliding). Also: idle breathing,
+ * a wind-up/strike kick, slide tackle, fall + get-up, three celebrations.
  */
 window.GS = window.GS || {};
 (function () {
   'use strict';
   const U = GS.U, C = GS.CFG;
+  const PI = Math.PI, TAU = PI * 2;
 
   let TOON = null;
   function toon() { if (!TOON) TOON = U.toonGradient([0.42, 0.74, 1.0]); return TOON; }
 
-  // shared per-team material cache
+  // ---- per-team kit material cache ----
   const KIT_CACHE = {};
   function teamKit(team, isGK) {
     const key = team.abbr + (isGK ? '_gk' : '');
@@ -21,10 +32,11 @@ window.GS = window.GS || {};
     const kit = {
       jersey: mk(jc),
       jerseyTrim: mk(team.c2),
-      shorts: mk(isGK ? U.shade(team.gk, 0.55) : team.short),
+      shorts: mk(isGK ? U.shade(team.gk, 0.5) : team.short),
+      shortsTrim: mk(team.c2),
       socks: mk(jc),
       sockTrim: mk(team.c2),
-      shoe: mk('#16181d'),
+      shoe: mk('#181a20'),
     };
     KIT_CACHE[key] = kit;
     return kit;
@@ -32,7 +44,6 @@ window.GS = window.GS || {};
 
   function numberTexture(num, bg, fg) {
     const { canvas, ctx } = U.makeCanvas(64, 64);
-    ctx.fillStyle = 'rgba(0,0,0,0)';
     ctx.clearRect(0, 0, 64, 64);
     ctx.fillStyle = fg;
     ctx.font = '900 46px "Arial Black", Arial, sans-serif';
@@ -43,29 +54,53 @@ window.GS = window.GS || {};
     return t;
   }
 
-  // build a limb group pivoting at its top; returns {pivot, joint}
-  function makeLimb(len, rTop, rBot, mat) {
-    const pivot = new THREE.Group();
-    const seg = new THREE.Mesh(new THREE.CylinderGeometry(rTop, rBot, len, 8), mat);
-    seg.position.y = -len / 2;
-    seg.castShadow = true;
-    pivot.add(seg);
-    GS.addOutline(seg);
-    const cap = new THREE.Mesh(new THREE.SphereGeometry(rBot, 8, 6), mat);
-    cap.position.y = -len;
-    pivot.add(cap);
-    const joint = new THREE.Group();
-    joint.position.y = -len;
-    pivot.add(joint);
-    return { pivot, joint };
+  // ---- keyframe sampler (cyclic, smoothstep interpolation) ----
+  function sampleKF(tbl, t) {
+    t -= Math.floor(t);
+    const n = tbl.length;
+    let i0 = n - 1;
+    for (let i = 0; i < n; i++) { if (t >= tbl[i][0]) i0 = i; else break; }
+    const i1 = (i0 + 1) % n;
+    let t0 = tbl[i0][0], t1 = tbl[i1][0];
+    if (t1 <= t0) t1 += 1;
+    let tt = t; if (tt < t0) tt += 1;
+    let seg = (t1 - t0) ? (tt - t0) / (t1 - t0) : 0;
+    seg = U.clamp(seg, 0, 1);
+    const s = seg * seg * (3 - 2 * seg);
+    return U.lerp(tbl[i0][1], tbl[i1][1], s);
+  }
+
+  // Run cycle keyframes. Convention: forward = local +z. For x-rotations,
+  // forward tilt = NEGATIVE rotation.x, so tables are authored "forward
+  // positive" and negated on apply. Knee flexion bends the shin back = +x.
+  // lp = local phase, 0 = foot strike.
+  const RUN = {
+    hip:   [[0.00, 0.62], [0.16, 0.18], [0.32, -0.34], [0.46, -0.52], [0.62, 0.10], [0.78, 0.55], [0.92, 0.70]],
+    knee:  [[0.00, 0.22], [0.12, 0.62], [0.30, 0.30], [0.45, 0.16], [0.55, 1.25], [0.70, 1.55], [0.84, 0.55], [0.95, 0.14]],
+    ankle: [[0.00, 0.10], [0.22, -0.18], [0.44, 0.55], [0.60, -0.32], [0.85, -0.05]],
+  };
+
+  // ---- limb segment helper (tapered, rounded bottom) ----
+  function limbMesh(parent, topR, botR, len, mat, outline) {
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(topR, botR, len, 10), mat);
+    m.position.y = -len / 2; m.castShadow = true;
+    parent.add(m);
+    if (outline) GS.addOutline(m);
+    const cap = new THREE.Mesh(new THREE.SphereGeometry(botR * 1.02, 10, 7), mat);
+    cap.position.y = -len; cap.castShadow = true;
+    parent.add(cap);
+    return m;
+  }
+  function joint(parent, x, y, z) {
+    const g = new THREE.Group(); g.position.set(x, y, z); parent.add(g); return g;
   }
 
   class Player {
     constructor(scene, opts) {
       this.scene = scene;
       this.team = opts.team;
-      this.teamId = opts.teamId;       // 0 or 1
-      this.attackDir = opts.attackDir; // +1 toward +x goal, -1 toward -x
+      this.teamId = opts.teamId;
+      this.attackDir = opts.attackDir;
       this.isGK = !!opts.isGK;
       this.role = opts.role || 'MID';
       this.number = opts.number;
@@ -73,247 +108,271 @@ window.GS = window.GS || {};
       this.home = { x: opts.homeX, z: opts.homeZ };
       this.formation = { x: opts.homeX, z: opts.homeZ };
 
-      // physics state
       this.pos = new THREE.Vector3(opts.homeX, 0, opts.homeZ);
       this.vel = new THREE.Vector3();
-      this.facing = this.attackDir > 0 ? 0 : Math.PI;
+      this.facing = this.attackDir > 0 ? 0 : PI;
       this.input = { x: 0, z: 0, sprint: false };
-      this.maxSpeed = (this.isGK ? 7.4 : 8.6) * (opts.speedMul || 1);
-      this.accel = 52;
+      this.maxSpeed = (this.isGK ? 7.6 : 8.7) * (opts.speedMul || 1);
+      this.accel = 36;          // m/s^2 toward desired velocity
+      this.decel = 26;          // m/s^2 friction when no input
       this.speedFrac = 0;
-
-      // attributes (AI/difficulty)
       this.attr = opts.attr || { speed: 1, react: 0.12, shootAcc: 0.85, pass: 0.9 };
 
-      // anim / action state
-      this.animPhase = 0;
-      this.kickTimer = 0; this.kickDur = 0.34; this.kickLeg = 1; this.kickFired = false;
-      this.slideTimer = 0; this.slideDir = new THREE.Vector3();
+      // animation/action state
+      this.runCycle = Math.random();
+      this.idlePhase = Math.random() * TAU;
+      this.kickTimer = 0; this.kickDur = 0.36; this.kickLeg = 1; this.kickPower = 0;
+      this.slideTimer = 0; this.slideMax = 0.7; this.slideDir = new THREE.Vector3();
       this.celebrateTimer = 0; this.celebrateType = 0;
       this.stunTimer = 0;
+      this.fallTimer = 0; this.fallMax = 1.6; this.fallDir = new THREE.Vector3(1, 0, 0);
       this.hasBall = false;
       this.boost = null; this.boostTimer = 0;
 
+      // smoothed pose accumulators (for graceful blends)
+      this._lean = 0;
+
       this._buildModel();
-    }
-
-    _buildModel() {
-      const kit = teamKit(this.team, this.isGK);
-      this.kit = kit;
-      const root = new THREE.Group();
-      this.root = root;
-      this.parts = {};
-
-      // hips anchor — whole body bobs from here
-      const body = new THREE.Group();
-      body.position.y = 0.92;
-      root.add(body);
-      this.parts.body = body;
-
-      // torso (tapered)
-      const torso = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.27, 0.32, 0.62, 12), kit.jersey);
-      torso.position.y = 0.31;
-      torso.castShadow = true;
-      body.add(torso);
-      GS.addOutline(torso);
-      this.parts.torso = torso;
-
-      // chest shoulder yoke (trim color collar)
-      const collar = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.285, 0.27, 0.12, 12), kit.jerseyTrim);
-      collar.position.y = 0.58;
-      body.add(collar);
-
-      // side stripe accents
-      for (const s of [-1, 1]) {
-        const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.5, 0.12), kit.jerseyTrim);
-        stripe.position.set(s * 0.26, 0.32, 0);
-        body.add(stripe);
-      }
-
-      // jersey number on back
-      const numTex = numberTexture(this.number, this.team.c1, this.team.c2);
-      const numPlane = new THREE.Mesh(new THREE.PlaneGeometry(0.34, 0.34),
-        new THREE.MeshBasicMaterial({ map: numTex, transparent: true }));
-      numPlane.position.set(0, 0.36, -0.31);
-      numPlane.rotation.y = Math.PI;
-      body.add(numPlane);
-
-      // neck + head
-      const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 0.1, 8),
-        new THREE.MeshToonMaterial({ color: new THREE.Color(opts_skin(this)), gradientMap: toon() }));
-      neck.position.y = 0.66;
-      body.add(neck);
-
-      const skinMat = new THREE.MeshToonMaterial({ color: new THREE.Color(this._skin), gradientMap: toon() });
-      this._skinMat = skinMat;
-      const headG = new THREE.Group();
-      headG.position.y = 0.82;
-      body.add(headG);
-      this.parts.head = headG;
-      const head = new THREE.Mesh(new THREE.SphereGeometry(0.215, 16, 13), skinMat);
-      head.scale.set(1, 1.1, 1.02);
-      head.castShadow = true;
-      headG.add(head);
-      GS.addOutline(head);
-
-      // hair cap
-      const hairMat = new THREE.MeshToonMaterial({ color: new THREE.Color(this._hair), gradientMap: toon() });
-      const hair = new THREE.Mesh(new THREE.SphereGeometry(0.222, 14, 11, 0, Math.PI * 2, 0, Math.PI * 0.64), hairMat);
-      hair.position.y = 0.04;
-      hair.scale.set(1.04, 1.12, 1.06);
-      headG.add(hair);
-      GS.addOutline(hair);
-      // nose nub for facing readability
-      const nose = new THREE.Mesh(new THREE.SphereGeometry(0.035, 6, 6), skinMat);
-      nose.position.set(0.17, -0.01, 0);
-      headG.add(nose);
-
-      // arms
-      this.parts.armL = makeLimb(0.3, 0.07, 0.055, kit.jersey);
-      this.parts.armR = makeLimb(0.3, 0.07, 0.055, kit.jersey);
-      this.parts.armL.pivot.position.set(-0.3, 0.56, 0);
-      this.parts.armR.pivot.position.set(0.3, 0.56, 0);
-      body.add(this.parts.armL.pivot, this.parts.armR.pivot);
-      this.parts.foreL = makeLimb(0.28, 0.055, 0.05, skinMat);
-      this.parts.foreR = makeLimb(0.28, 0.055, 0.05, skinMat);
-      this.parts.armL.joint.add(this.parts.foreL.pivot);
-      this.parts.armR.joint.add(this.parts.foreR.pivot);
-
-      // legs (upper = skin/shorts boundary; we color upper as shorts then skin knee)
-      this.parts.legL = makeLimb(0.42, 0.1, 0.085, kit.shorts);
-      this.parts.legR = makeLimb(0.42, 0.1, 0.085, kit.shorts);
-      this.parts.legL.pivot.position.set(-0.13, 0.02, 0);
-      this.parts.legR.pivot.position.set(0.13, 0.02, 0);
-      body.add(this.parts.legL.pivot, this.parts.legR.pivot);
-
-      // shins with socks
-      this.parts.shinL = makeLimb(0.4, 0.08, 0.07, kit.socks);
-      this.parts.shinR = makeLimb(0.4, 0.08, 0.07, kit.socks);
-      this.parts.legL.joint.add(this.parts.shinL.pivot);
-      this.parts.legR.joint.add(this.parts.shinR.pivot);
-      // sock trim ring
-      for (const sh of [this.parts.shinL, this.parts.shinR]) {
-        const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.085, 0.06, 8), kit.sockTrim);
-        ring.position.y = -0.05;
-        sh.pivot.add(ring);
-      }
-      // boots
-      for (const side of ['L', 'R']) {
-        const shin = this.parts['shin' + side];
-        const boot = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.11, 0.3), kit.shoe);
-        boot.position.set(0, -0.4, 0.07);
-        boot.castShadow = true;
-        shin.pivot.add(boot);
-        GS.addOutline(boot);
-      }
-
-      // shorts block over hips
-      const shortsBlock = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.24, 0.22, 10), kit.shorts);
-      shortsBlock.position.y = 0.04;
-      body.add(shortsBlock);
-
-      // GK gloves
-      if (this.isGK) {
-        for (const f of [this.parts.foreL, this.parts.foreR]) {
-          const glove = new THREE.Mesh(new THREE.SphereGeometry(0.085, 8, 6),
-            new THREE.MeshToonMaterial({ color: new THREE.Color(this.team.c2), gradientMap: toon() }));
-          glove.position.y = -0.28;
-          glove.scale.set(1.2, 1.2, 0.9);
-          f.pivot.add(glove);
-        }
-      }
-
-      // soft contact shadow
-      const shTex = U.glowTexture('rgba(0,0,0,0.55)', 'rgba(0,0,0,0.25)');
-      const shadow = new THREE.Mesh(new THREE.PlaneGeometry(1.05, 0.78),
-        new THREE.MeshBasicMaterial({ map: shTex, transparent: true, depthWrite: false, opacity: 0.6 }));
-      shadow.rotation.x = -Math.PI / 2;
-      shadow.position.y = 0.02;
-      root.add(shadow);
-      this.contactShadow = shadow;
-
-      // selection ring (hidden by default)
-      const ringTex = ringTexture();
-      const ring = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 1.5),
-        new THREE.MeshBasicMaterial({
-          map: ringTex, transparent: true, depthWrite: false,
-          blending: THREE.AdditiveBlending,
-        }));
-      ring.rotation.x = -Math.PI / 2;
-      ring.position.y = 0.05;
-      ring.visible = false;
-      root.add(ring);
-      this.selRing = ring;
-
-      root.position.copy(this.pos);
-      this.scene.add(root);
     }
 
     get _skin() { if (!this.__skin) this.__skin = U.choice(GS.SKINS); return this.__skin; }
     get _hair() { if (!this.__hair) this.__hair = U.choice(GS.HAIRS); return this.__hair; }
 
-    setSelected(on, color) {
-      this.selRing.visible = on;
-      if (on && color) this.selRing.material.color.set(color);
+    _buildModel() {
+      const kit = teamKit(this.team, this.isGK);
+      this.kit = kit;
+      const skinMat = new THREE.MeshToonMaterial({ color: new THREE.Color(this._skin), gradientMap: toon() });
+      const hairMat = new THREE.MeshToonMaterial({ color: new THREE.Color(this._hair), gradientMap: toon() });
+      this._skinMat = skinMat;
+
+      const root = new THREE.Group();
+      this.root = root;
+      const J = this.J = {};
+
+      // ---------- pelvis / hips ----------
+      const hips = joint(root, 0, 0.92, 0);
+      J.hips = hips;
+      const pelvis = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.17, 0.2, 12), kit.shorts);
+      pelvis.scale.set(1.25, 1, 0.85);
+      pelvis.castShadow = true;
+      hips.add(pelvis); GS.addOutline(pelvis);
+      // shorts hem flares over thighs
+      const hem = new THREE.Mesh(new THREE.CylinderGeometry(0.21, 0.27, 0.16, 12), kit.shorts);
+      hem.scale.set(1.18, 1, 0.85); hem.position.y = -0.12; hem.castShadow = true;
+      hips.add(hem); GS.addOutline(hem);
+      const hemTrim = new THREE.Mesh(new THREE.CylinderGeometry(0.275, 0.265, 0.03, 12), kit.shortsTrim);
+      hemTrim.scale.set(1.18, 1, 0.85); hemTrim.position.y = -0.19;
+      hips.add(hemTrim);
+
+      // ---------- spine / chest ----------
+      const spine = joint(hips, 0, 0.16, 0);
+      J.spine = spine;
+      const chest = new THREE.Mesh(new THREE.CylinderGeometry(0.29, 0.21, 0.46, 14), kit.jersey);
+      chest.scale.set(1.12, 1, 0.82);
+      chest.position.y = 0.21; chest.castShadow = true;
+      spine.add(chest); GS.addOutline(chest);
+      // chest taper to shoulders (deltoid yoke)
+      const yoke = new THREE.Mesh(new THREE.SphereGeometry(0.3, 14, 10, 0, TAU, 0, PI * 0.55), kit.jersey);
+      yoke.scale.set(1.15, 0.7, 0.85); yoke.position.y = 0.4; yoke.castShadow = true;
+      spine.add(yoke); GS.addOutline(yoke);
+      // collar trim
+      const collar = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.028, 8, 16), kit.jerseyTrim);
+      collar.rotation.x = PI / 2; collar.position.y = 0.46; collar.scale.set(1, 0.8, 1);
+      spine.add(collar);
+      // chest stripe
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.46, 0.18), kit.jerseyTrim);
+      stripe.position.set(0, 0.21, 0.16);
+      spine.add(stripe);
+      // back number
+      const numTex = numberTexture(this.number, this.team.c1, this.team.c2);
+      const numPlane = new THREE.Mesh(new THREE.PlaneGeometry(0.32, 0.32),
+        new THREE.MeshBasicMaterial({ map: numTex, transparent: true }));
+      numPlane.position.set(0, 0.26, -0.19); numPlane.rotation.y = PI;
+      numPlane.scale.set(1, 1, 1);
+      spine.add(numPlane);
+
+      // ---------- neck + head ----------
+      const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.09, 0.12, 10), skinMat);
+      neck.position.y = 0.49; spine.add(neck);
+      const headPivot = joint(spine, 0, 0.56, 0);
+      J.head = headPivot;
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 18, 14), skinMat);
+      head.scale.set(0.98, 1.12, 1.0); head.castShadow = true;
+      headPivot.add(head); GS.addOutline(head);
+      // jaw/chin
+      const jaw = new THREE.Mesh(new THREE.SphereGeometry(0.14, 12, 9), skinMat);
+      jaw.position.set(0, -0.1, 0.05); jaw.scale.set(0.9, 0.8, 0.95);
+      headPivot.add(jaw);
+      // hair
+      const hair = new THREE.Mesh(new THREE.SphereGeometry(0.208, 16, 12, 0, TAU, 0, PI * 0.62), hairMat);
+      hair.position.y = 0.03; hair.scale.set(1.06, 1.14, 1.08); hair.castShadow = true;
+      headPivot.add(hair); GS.addOutline(hair);
+      this._addFace(headPivot, skinMat);
+
+      // ---------- arms ----------
+      this._buildArm(spine, J, 'L', -1, kit, skinMat);
+      this._buildArm(spine, J, 'R', 1, kit, skinMat);
+
+      // ---------- legs ----------
+      this._buildLeg(hips, J, 'L', -1, kit, skinMat);
+      this._buildLeg(hips, J, 'R', 1, kit, skinMat);
+
+      // GK keeps gloves
+      if (this.isGK) {
+        const gloveMat = new THREE.MeshToonMaterial({ color: new THREE.Color(this.team.c2), gradientMap: toon() });
+        for (const s of ['L', 'R']) {
+          const g = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 8), gloveMat);
+          g.scale.set(1.3, 1.3, 0.85); g.position.y = -0.02;
+          J['hand' + s].add(g); GS.addOutline(g);
+        }
+      }
+
+      // contact shadow + selection ring
+      const shTex = U.glowTexture('rgba(0,0,0,0.6)', 'rgba(0,0,0,0.22)');
+      const shadow = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.74),
+        new THREE.MeshBasicMaterial({ map: shTex, transparent: true, depthWrite: false, opacity: 0.65 }));
+      shadow.rotation.x = -PI / 2; shadow.position.y = 0.02;
+      root.add(shadow); this.contactShadow = shadow;
+
+      const ring = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 1.6),
+        new THREE.MeshBasicMaterial({ map: ringTexture(), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+      ring.rotation.x = -PI / 2; ring.position.y = 0.05; ring.visible = false;
+      root.add(ring); this.selRing = ring;
+
+      root.position.copy(this.pos);
+      this.scene.add(root);
     }
+
+    _addFace(headPivot, skinMat) {
+      const white = new THREE.MeshBasicMaterial({ color: 0xf4f4f4 });
+      const dark = new THREE.MeshBasicMaterial({ color: 0x1a1d24 });
+      for (const sx of [-1, 1]) {
+        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 6), white);
+        eye.position.set(sx * 0.07, 0.02, 0.185); eye.scale.set(1, 1.2, 0.6);
+        headPivot.add(eye);
+        const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.022, 6, 6), dark);
+        pupil.position.set(sx * 0.07, 0.02, 0.21);
+        headPivot.add(pupil);
+        const brow = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.018, 0.02),
+          new THREE.MeshBasicMaterial({ color: new THREE.Color(this._hair) }));
+        brow.position.set(sx * 0.07, 0.075, 0.19); brow.rotation.z = sx * -0.15;
+        headPivot.add(brow);
+      }
+      const nose = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.06, 6), skinMat);
+      nose.rotation.x = PI / 2; nose.position.set(0, -0.02, 0.21);
+      headPivot.add(nose);
+    }
+
+    _buildArm(spine, J, side, sx, kit, skinMat) {
+      const sh = joint(spine, sx * 0.27, 0.4, 0);
+      J['sh' + side] = sh;
+      // short sleeve
+      const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.075, 0.16, 10), kit.jersey);
+      sleeve.position.y = -0.06; sleeve.castShadow = true;
+      sh.add(sleeve); GS.addOutline(sleeve);
+      const sleeveTrim = new THREE.Mesh(new THREE.CylinderGeometry(0.078, 0.074, 0.025, 10), kit.jerseyTrim);
+      sleeveTrim.position.y = -0.145; sh.add(sleeveTrim);
+      // upper arm (skin)
+      limbMesh(sh, 0.062, 0.052, 0.27, skinMat, true);
+      const el = joint(sh, 0, -0.27, 0);
+      J['el' + side] = el;
+      limbMesh(el, 0.05, 0.045, 0.25, skinMat, true);
+      const hand = joint(el, 0, -0.25, 0);
+      J['hand' + side] = hand;
+      const handMesh = new THREE.Mesh(new THREE.SphereGeometry(0.058, 10, 8), skinMat);
+      handMesh.scale.set(0.85, 1.1, 0.6); handMesh.castShadow = true;
+      hand.add(handMesh); GS.addOutline(handMesh);
+    }
+
+    _buildLeg(hips, J, side, sx, kit, skinMat) {
+      const hp = joint(hips, sx * 0.12, -0.14, 0);
+      J['hip' + side] = hp;
+      // thigh (skin, below shorts)
+      limbMesh(hp, 0.1, 0.082, 0.44, skinMat, true);
+      const kn = joint(hp, 0, -0.44, 0);
+      J['knee' + side] = kn;
+      // shin with sock
+      limbMesh(kn, 0.084, 0.066, 0.42, kit.socks, true);
+      const sockTop = new THREE.Mesh(new THREE.CylinderGeometry(0.088, 0.084, 0.04, 10), kit.sockTrim);
+      sockTop.position.y = -0.06; kn.add(sockTop);
+      const ank = joint(kn, 0, -0.42, 0);
+      J['ankle' + side] = ank;
+      // boot: heel block + toe
+      const boot = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.1, 0.26), kit.shoe);
+      boot.position.set(0, -0.03, 0.06); boot.castShadow = true;
+      ank.add(boot); GS.addOutline(boot);
+      const toe = new THREE.Mesh(new THREE.SphereGeometry(0.07, 10, 8), kit.shoe);
+      toe.scale.set(0.9, 0.7, 1.2); toe.position.set(0, -0.05, 0.2); toe.castShadow = true;
+      ank.add(toe); GS.addOutline(toe);
+      const sole = new THREE.Mesh(new THREE.BoxGeometry(0.135, 0.03, 0.3), kit.jerseyTrim);
+      sole.position.set(0, -0.085, 0.07); ank.add(sole);
+    }
+
+    setSelected(on, color) { this.selRing.visible = on; if (on && color) this.selRing.material.color.set(color); }
 
     playKick(power, leg) {
       this.kickTimer = this.kickDur;
       this.kickLeg = leg != null ? leg : (Math.random() < 0.5 ? 1 : -1);
-      this.kickFired = false;
-      this.kickPower = power;
+      this.kickPower = U.clamp(power || 0.5, 0, 1);
     }
-
     playSlide(dir) {
-      this.slideTimer = 0.6;
+      if (this.fallTimer > 0) return;
+      this.slideTimer = this.slideMax;
       this.slideDir.copy(dir).normalize();
-      this.vel.addScaledVector(this.slideDir, 9);
+      this.vel.addScaledVector(this.slideDir, 9.5);
     }
-
-    celebrate(type) {
-      this.celebrateTimer = 3.0;
-      this.celebrateType = type != null ? type : U.randInt(0, 2);
-    }
-
+    celebrate(type) { this.celebrateTimer = 3.2; this.celebrateType = type != null ? type : U.randInt(0, 2); }
     stun(t) { this.stunTimer = Math.max(this.stunTimer, t); }
-
+    knockDown(dir, power) {
+      if (this.fallTimer > 0) return;
+      this.fallTimer = this.fallMax;
+      if (dir) this.fallDir.copy(dir).setY(0).normalize();
+      this.slideTimer = 0;
+      this.vel.addScaledVector(this.fallDir, power || 4);
+    }
     setBoost(type, dur) { this.boost = type; this.boostTimer = dur; }
 
-    // ---- physics integration ----
+    // ---------------- physics ----------------
     update(dt, bounds) {
-      // timers
       if (this.kickTimer > 0) this.kickTimer -= dt;
       if (this.celebrateTimer > 0) this.celebrateTimer -= dt;
       if (this.stunTimer > 0) this.stunTimer -= dt;
+      if (this.fallTimer > 0) this.fallTimer -= dt;
       if (this.boostTimer > 0) { this.boostTimer -= dt; if (this.boostTimer <= 0) this.boost = null; }
-
       const sliding = this.slideTimer > 0;
       if (sliding) this.slideTimer -= dt;
 
-      let targetVX = 0, targetVZ = 0;
-      const sprinting = this.input.sprint && !sliding && this.stunTimer <= 0;
-      let speed = this.maxSpeed * (sprinting ? 1.32 : 1);
-      if (this.boost === 'sprint') speed *= 1.32;
-      if (this.hasBall) speed *= 0.92; // slightly slower with the ball
-      if (this.celebrateTimer > 0) speed = 0;
+      const disabled = this.fallTimer > 0 || this.stunTimer > 0 || this.celebrateTimer > 0;
+      const sprinting = this.input.sprint && !sliding && !disabled;
+      let speed = this.maxSpeed * (sprinting ? 1.34 : 1);
+      if (this.boost === 'sprint') speed *= 1.3;
+      if (this.hasBall) speed *= 0.9;
 
-      if (!sliding && this.stunTimer <= 0 && this.celebrateTimer <= 0) {
-        targetVX = this.input.x * speed;
-        targetVZ = this.input.z * speed;
+      // desired velocity
+      let dvx = 0, dvz = 0, hasInput = false;
+      if (!sliding && !disabled) {
+        dvx = this.input.x * speed; dvz = this.input.z * speed;
+        hasInput = (this.input.x || this.input.z);
       }
 
-      // accelerate toward target velocity
-      const a = sliding ? 6 : this.accel;
-      this.vel.x = U.damp(this.vel.x, targetVX, a / Math.max(speed, 1) * 2.2, dt);
-      this.vel.z = U.damp(this.vel.z, targetVZ, a / Math.max(speed, 1) * 2.2, dt);
-      if (sliding) { this.vel.x *= Math.exp(-2.5 * dt); this.vel.z *= Math.exp(-2.5 * dt); }
+      if (sliding) {
+        // momentum decays through the slide
+        const fr = Math.exp(-2.6 * dt);
+        this.vel.x *= fr; this.vel.z *= fr;
+      } else if (disabled) {
+        const fr = Math.exp(-(this.fallTimer > 0 ? 3.2 : 5.0) * dt);
+        this.vel.x *= fr; this.vel.z *= fr;
+      } else {
+        // accelerate toward desired with momentum; friction when no input
+        const rate = (hasInput ? this.accel : this.decel) * dt;
+        let ddx = dvx - this.vel.x, ddz = dvz - this.vel.z;
+        const dl = U.len2(ddx, ddz);
+        if (dl > rate) { ddx = ddx / dl * rate; ddz = ddz / dl * rate; }
+        this.vel.x += ddx; this.vel.z += ddz;
+      }
 
       this.pos.x += this.vel.x * dt;
       this.pos.z += this.vel.z * dt;
-
-      // bounds clamp (players can roam a bit outside the lines)
       if (bounds) {
         this.pos.x = U.clamp(this.pos.x, bounds.minX, bounds.maxX);
         this.pos.z = U.clamp(this.pos.z, bounds.minZ, bounds.maxZ);
@@ -322,166 +381,248 @@ window.GS = window.GS || {};
       // facing
       const sp = U.len2(this.vel.x, this.vel.z);
       this.speedFrac = U.clamp(sp / this.maxSpeed, 0, 1.4);
-      if (sp > 0.6 && this.celebrateTimer <= 0) {
-        const want = Math.atan2(this.vel.z, this.vel.x);
-        this.facing = U.angleDamp(this.facing, want, 16, dt);
-      } else if (this.input.x || this.input.z) {
-        const want = Math.atan2(this.input.z, this.input.x);
-        this.facing = U.angleDamp(this.facing, want, 12, dt);
+      if (!disabled) {
+        if (sliding) { /* keep slide facing */ this.facing = U.angleDamp(this.facing, Math.atan2(this.slideDir.z, this.slideDir.x), 6, dt); }
+        else if (sp > 0.5) this.facing = U.angleDamp(this.facing, Math.atan2(this.vel.z, this.vel.x), 15, dt);
+        else if (hasInput) this.facing = U.angleDamp(this.facing, Math.atan2(this.input.z, this.input.x), 11, dt);
       }
 
-      this.root.position.copy(this.pos);
-      this.root.rotation.y = -this.facing + Math.PI / 2;
-
+      this.root.position.set(this.pos.x, 0, this.pos.z);
+      this.root.rotation.set(0, -this.facing + PI / 2, 0);
       this._animate(dt);
     }
 
     faceTo(x, z, dt, rate) {
-      const want = Math.atan2(z - this.pos.z, x - this.pos.x);
-      this.facing = U.angleDamp(this.facing, want, rate || 14, dt);
+      this.facing = U.angleDamp(this.facing, Math.atan2(z - this.pos.z, x - this.pos.x), rate || 14, dt);
+    }
+
+    // ---------------- animation ----------------
+    _resetPose() {
+      const J = this.J;
+      J.hips.position.set(0, 0.92, 0); J.hips.rotation.set(0, 0, 0);
+      J.spine.rotation.set(0, 0, 0); J.head.rotation.set(0, 0, 0);
+      this.root.position.y = 0; this.root.rotation.x = 0; this.root.rotation.z = 0;
     }
 
     _animate(dt) {
-      const P = this.parts;
-      const sliding = this.slideTimer > 0;
-      const celeb = this.celebrateTimer > 0;
-
-      if (celeb) { this._animCelebrate(dt); return; }
-      if (sliding) { this._animSlide(dt); return; }
+      if (this.fallTimer > 0) { this._animFall(dt); return; }
+      if (this.celebrateTimer > 0) { this._animCelebrate(dt); return; }
+      if (this.slideTimer > 0) { this._animSlide(dt); return; }
       if (this.stunTimer > 0) { this._animStun(dt); return; }
+      this._animRun(dt);
+    }
 
-      // run / idle blend
-      const f = this.speedFrac;
-      const stride = 9 + f * 5;
-      this.animPhase += dt * stride * (0.3 + f);
-      const ph = this.animPhase;
-      const sw = Math.sin(ph) * (0.25 + f * 0.95);   // leg swing amplitude
-      const knee = Math.max(0, Math.sin(ph + Math.PI / 2)) * (0.2 + f * 1.2);
+    _animRun(dt) {
+      const J = this.J;
+      const f = U.clamp(this.speedFrac, 0, 1.3);
+      const amp = U.clamp(f * 1.05, 0, 1.2);
+      const idleW = 1 - U.clamp(f / 0.28, 0, 1);
+      this.idlePhase += dt;
 
-      // legs
-      P.legL.pivot.rotation.x = sw;
-      P.legR.pivot.rotation.x = -sw;
-      P.shinL.pivot.rotation.x = Math.max(0, -Math.sin(ph)) * (0.3 + f * 1.4);
-      P.shinR.pivot.rotation.x = Math.max(0, Math.sin(ph)) * (0.3 + f * 1.4);
+      // cadence locked to ground speed (stride ~2.3m) -> no foot skating
+      const gs = U.len2(this.vel.x, this.vel.z);
+      const cadence = U.clamp(gs / 2.3, 0, 3.8);
+      this.runCycle = (this.runCycle + dt * cadence) % 1;
+      const c = this.runCycle;
 
-      // arms counter-swing
-      const asw = Math.sin(ph) * (0.2 + f * 0.7);
-      P.armL.pivot.rotation.x = -asw;
-      P.armR.pivot.rotation.x = asw;
-      P.armL.pivot.rotation.z = 0.18 + f * 0.05;
-      P.armR.pivot.rotation.z = -0.18 - f * 0.05;
-      P.foreL.pivot.rotation.x = 0.3 + f * 0.3;
-      P.foreR.pivot.rotation.x = 0.3 + f * 0.3;
+      // sample both legs (offset by half a cycle)
+      const hipL = sampleKF(RUN.hip, c) * amp;
+      const hipR = sampleKF(RUN.hip, c + 0.5) * amp;
+      const knL = sampleKF(RUN.knee, c) * amp;
+      const knR = sampleKF(RUN.knee, c + 0.5) * amp;
+      const anL = sampleKF(RUN.ankle, c) * amp;
+      const anR = sampleKF(RUN.ankle, c + 0.5) * amp;
 
-      // body bob + lean
-      const bob = Math.abs(Math.sin(ph)) * (0.02 + f * 0.06);
-      P.body.position.y = 0.92 + bob;
-      P.body.rotation.x = f * 0.14;
-      P.body.rotation.z = Math.sin(ph) * f * 0.04;
-      P.head.rotation.x = -f * 0.1;
+      // legs: forward = -x ; knee flexion = +x ; ankle roll tuned
+      J.hipL.rotation.set(-hipL, 0, -0.04 * amp);
+      J.hipR.rotation.set(-hipR, 0, 0.04 * amp);
+      J.kneeL.rotation.x = knL;
+      J.kneeR.rotation.x = knR;
+      J.ankleL.rotation.x = -anL * 0.7;
+      J.ankleR.rotation.x = -anR * 0.7;
 
-      // idle breathing when nearly stopped
-      if (f < 0.05) {
-        const br = Math.sin(this.animPhase * 0.2) * 0.012;
-        P.body.position.y = 0.92 + br;
-        P.legL.pivot.rotation.x *= 0.1; P.legR.pivot.rotation.x *= 0.1;
-        P.shinL.pivot.rotation.x *= 0.1; P.shinR.pivot.rotation.x *= 0.1;
-      }
+      // arms swing opposite to the SAME-side leg (contralateral overall)
+      const armL = -hipL * 0.85, armR = -hipR * 0.85;
+      const elbowBase = 0.55 * amp + 0.2 * idleW;
+      J.shL.rotation.set(-armL, 0, 0.16 + 0.05 * amp);
+      J.shR.rotation.set(-armR, 0, -0.16 - 0.05 * amp);
+      J.elL.rotation.x = -(elbowBase + 0.45 * Math.max(0, armL));
+      J.elR.rotation.x = -(elbowBase + 0.45 * Math.max(0, armR));
 
-      // kick overrides one leg
-      if (this.kickTimer > 0) this._animKick();
+      // pelvis: vertical bob (two bounces), yaw + roll, hip drop on swing side
+      const bob = (0.5 - 0.5 * Math.cos(TAU * 2 * c)) * 0.07 * amp;
+      const breathe = Math.sin(this.idlePhase * 2.0) * 0.012 * idleW;
+      J.hips.position.y = 0.92 - 0.06 * amp + bob + breathe;
+      const pelvisYaw = 0.14 * amp * Math.sin(TAU * c);
+      const pelvisRoll = 0.07 * amp * Math.sin(TAU * c) + 0.02 * idleW * Math.sin(this.idlePhase * 1.3);
+      J.hips.rotation.set(0, pelvisYaw, pelvisRoll);
 
-      // GK ready stance arms out
-      if (this.isGK && f < 0.4) {
-        P.armL.pivot.rotation.z = 0.65;
-        P.armR.pivot.rotation.z = -0.65;
-        P.armL.pivot.rotation.x = -0.2;
-        P.armR.pivot.rotation.x = -0.2;
+      // spine: counter-rotate shoulders, lean forward with speed
+      const lean = 0.1 + amp * 0.26;
+      this._lean = U.damp(this._lean, lean, 10, dt);
+      J.spine.rotation.set(-this._lean, -pelvisYaw * 1.3, -pelvisRoll * 0.6);
+
+      // head stays level + small look bob
+      J.head.rotation.set(this._lean * 0.75 - 0.02, pelvisYaw * 0.4, 0);
+
+      this.root.position.y = 0;
+
+      // kick overrides the striking leg
+      if (this.kickTimer > 0) this._applyKick();
+
+      // GK idle: arms ready, knees soft
+      if (this.isGK && f < 0.45 && this.kickTimer <= 0) {
+        J.shL.rotation.set(-0.25, 0, 0.7);
+        J.shR.rotation.set(-0.25, 0, -0.7);
+        J.elL.rotation.x = -0.9; J.elR.rotation.x = -0.9;
+        J.hipL.rotation.x = -0.12; J.hipR.rotation.x = -0.12;
+        J.kneeL.rotation.x = 0.25; J.kneeR.rotation.x = 0.25;
+        J.hips.position.y = 0.86 + breathe;
       }
     }
 
-    _animKick() {
-      const P = this.parts;
-      const t = 1 - this.kickTimer / this.kickDur;   // 0..1
-      // wind up then snap
-      const swing = t < 0.4
-        ? U.lerp(0, -1.0, t / 0.4)                    // back-lift
-        : U.lerp(-1.0, 1.5, (t - 0.4) / 0.6);         // forward strike
-      const leg = this.kickLeg > 0 ? P.legR : P.legL;
-      const shin = this.kickLeg > 0 ? P.shinR : P.shinL;
-      leg.pivot.rotation.x = swing;
-      shin.pivot.rotation.x = Math.max(0, -swing * 0.6) + (t > 0.4 ? 0 : 0.4);
-      P.body.rotation.x = 0.1 + Math.sin(t * Math.PI) * 0.12;
-      // plant other arm out for balance
-      const arm = this.kickLeg > 0 ? P.armL : P.armR;
-      arm.pivot.rotation.z = (this.kickLeg > 0 ? 1 : -1) * (0.4 + Math.sin(t * Math.PI) * 0.5);
+    _applyKick() {
+      const J = this.J;
+      const t = 1 - this.kickTimer / this.kickDur;     // 0..1
+      const planted = this.kickLeg > 0 ? 'L' : 'R';
+      const kick = this.kickLeg > 0 ? 'R' : 'L';
+      // wind-up (0..0.4) then explosive strike (0.4..1)
+      let hipFwd, kneeFlex;
+      if (t < 0.4) {
+        const u = t / 0.4;
+        hipFwd = U.lerp(0, -0.7, u);                   // leg back
+        kneeFlex = U.lerp(0.2, 1.1, u);                // cock the knee
+      } else {
+        const u = (t - 0.4) / 0.6;
+        const e = u * u * (3 - 2 * u);
+        hipFwd = U.lerp(-0.7, 1.15, e);                // swing through
+        kneeFlex = U.lerp(1.1, 0.05, e);               // snap straight on contact
+      }
+      J['hip' + kick].rotation.x = -hipFwd;
+      J['knee' + kick].rotation.x = Math.max(0, kneeFlex);
+      J['ankle' + kick].rotation.x = -0.3 + (t > 0.45 ? -0.35 : 0.2);
+      // plant leg braces
+      J['hip' + planted].rotation.x = 0.12;
+      J['knee' + planted].rotation.x = 0.32;
+      // torso + arms balance
+      const tw = Math.sin(t * PI);
+      J.spine.rotation.set(-(0.12 + tw * 0.18), this.kickLeg * tw * 0.25, 0);
+      J['sh' + planted].rotation.z = (planted === 'L' ? 1 : -1) * (0.5 + tw * 0.6);
+      J['sh' + planted].rotation.x = -tw * 0.5;
+      J['sh' + kick].rotation.set(tw * 0.4, 0, (kick === 'L' ? 1 : -1) * 0.2);
     }
 
     _animSlide(dt) {
-      const P = this.parts;
-      // lean back, legs extended forward
-      P.body.position.y = U.damp(P.body.position.y, 0.45, 12, dt);
-      P.body.rotation.x = U.damp(P.body.rotation.x, -0.5, 12, dt);
-      P.legL.pivot.rotation.x = U.damp(P.legL.pivot.rotation.x, 1.3, 12, dt);
-      P.legR.pivot.rotation.x = U.damp(P.legR.pivot.rotation.x, 0.5, 12, dt);
-      P.shinL.pivot.rotation.x = 0.2; P.shinR.pivot.rotation.x = 0.9;
-      P.armL.pivot.rotation.z = 1.0; P.armR.pivot.rotation.z = -1.0;
-      this.root.rotation.y = -this.facing + Math.PI / 2;
+      const J = this.J;
+      const t = 1 - this.slideTimer / this.slideMax;
+      // drop hips, trail one leg, lead with the other
+      J.hips.position.y = U.damp(J.hips.position.y, 0.42, 14, dt);
+      J.hips.rotation.set(0, 0, 0);
+      this.root.rotation.x = U.damp(this.root.rotation.x, -0.55, 12, dt); // lean back onto slide
+      J.spine.rotation.set(0.35, 0, 0.1 * Math.sin(t * 6));
+      J.hipL.rotation.set(-1.15, 0, -0.2);   // lead leg extended forward
+      J.kneeL.rotation.x = 0.15;
+      J.hipR.rotation.set(0.35, 0, 0.25);    // trail leg tucked
+      J.kneeR.rotation.x = 1.2;
+      J.ankleL.rotation.x = -0.4; J.ankleR.rotation.x = 0.2;
+      J.shL.rotation.set(0.2, 0, 1.0); J.shR.rotation.set(-0.3, 0, -1.0);
+      J.elL.rotation.x = -0.5; J.elR.rotation.x = -0.7;
+      J.head.rotation.set(0.3, 0, 0);
+      if (this.slideTimer < 0.18) { // begin getting up
+        this.root.rotation.x = U.damp(this.root.rotation.x, 0, 14, dt);
+        J.hips.position.y = U.damp(J.hips.position.y, 0.7, 12, dt);
+      }
     }
 
     _animStun(dt) {
-      const P = this.parts;
-      P.body.position.y = U.damp(P.body.position.y, 0.7, 8, dt);
-      P.body.rotation.x = Math.sin(this.stunTimer * 30) * 0.1;
-      P.legL.pivot.rotation.x = 0.2; P.legR.pivot.rotation.x = -0.2;
+      const J = this.J;
+      J.hips.position.y = U.damp(J.hips.position.y, 0.72, 9, dt);
+      J.spine.rotation.set(0.1, Math.sin(this.stunTimer * 26) * 0.18, Math.sin(this.stunTimer * 31) * 0.12);
+      J.hipL.rotation.x = -0.25; J.hipR.rotation.x = 0.2;
+      J.kneeL.rotation.x = 0.5; J.kneeR.rotation.x = 0.4;
+      J.shL.rotation.set(-0.4, 0, 0.5 + Math.sin(this.stunTimer * 20) * 0.2);
+      J.shR.rotation.set(-0.4, 0, -0.5 - Math.sin(this.stunTimer * 22) * 0.2);
+      J.elL.rotation.x = -0.6; J.elR.rotation.x = -0.6;
+      J.head.rotation.set(-0.15, Math.sin(this.stunTimer * 18) * 0.2, 0);
+    }
+
+    _animFall(dt) {
+      const J = this.J;
+      const e = this.fallMax - this.fallTimer;            // elapsed
+      // phases: 0..0.4 topple down, 0.4..1.15 grounded, 1.15..end get up
+      let down;
+      if (e < 0.4) down = U.smoothstep(0, 0.4, e);
+      else if (e < this.fallMax - 0.45) down = 1;
+      else down = 1 - U.smoothstep(this.fallMax - 0.45, this.fallMax, e);
+
+      // topple backward relative to facing (fall onto back)
+      this.root.rotation.x = down * 1.45;
+      J.hips.position.y = U.lerp(0.92, 0.42, down);
+      this.root.position.y = 0;
+      // flailing/relaxed limbs while grounded
+      const fl = down;
+      const w = Math.sin(e * 9) * (1 - down) * 0.3; // small wobble going down
+      J.spine.rotation.set(-0.1 * fl, w, 0);
+      J.head.rotation.set(0.2 * fl, 0, 0);
+      J.hipL.rotation.set(-0.4 * fl, 0, -0.25 * fl);
+      J.hipR.rotation.set(-0.2 * fl, 0, 0.3 * fl);
+      J.kneeL.rotation.x = 0.7 * fl; J.kneeR.rotation.x = 0.45 * fl;
+      J.ankleL.rotation.x = 0; J.ankleR.rotation.x = 0;
+      J.shL.rotation.set(-0.5 * fl, 0, 0.9 * fl + 0.1);
+      J.shR.rotation.set(-0.6 * fl, 0, -0.8 * fl - 0.1);
+      J.elL.rotation.x = -0.4 * fl; J.elR.rotation.x = -0.5 * fl;
+      J.hips.rotation.set(0, 0, 0);
     }
 
     _animCelebrate(dt) {
-      const P = this.parts;
-      const t = 3.0 - this.celebrateTimer;
-      P.legL.pivot.rotation.x = 0; P.legR.pivot.rotation.x = 0;
-      P.shinL.pivot.rotation.x = 0; P.shinR.pivot.rotation.x = 0;
+      const J = this.J;
+      this._resetPose();
+      const t = 3.2 - this.celebrateTimer;
       if (this.celebrateType === 0) {
-        // jump + arms up pumping
-        const j = Math.max(0, Math.sin(t * 6)) * 0.4;
-        this.root.position.y = j;
-        P.armL.pivot.rotation.x = -2.4 + Math.sin(t * 12) * 0.3;
-        P.armR.pivot.rotation.x = -2.4 + Math.sin(t * 12 + 1) * 0.3;
-        P.body.position.y = 0.92;
+        // leaping fist-pump
+        const j = Math.max(0, Math.sin(t * 5.5));
+        this.root.position.y = j * 0.45;
+        const pump = Math.sin(t * 13);
+        J.shL.rotation.set(-2.5 + pump * 0.3, 0, 0.3);
+        J.shR.rotation.set(-2.5 - pump * 0.3, 0, -0.3);
+        J.elL.rotation.x = -0.6; J.elR.rotation.x = -0.6;
+        J.kneeL.rotation.x = j * 0.6; J.kneeR.rotation.x = j * 0.6;
+        J.hipL.rotation.x = j * 0.3; J.hipR.rotation.x = j * 0.3;
+        J.head.rotation.x = -0.2;
       } else if (this.celebrateType === 1) {
-        // slide-knee: arms wide spinning
-        this.root.position.y = 0;
-        this.root.rotation.y += dt * 4;
-        P.armL.pivot.rotation.z = 1.4; P.armR.pivot.rotation.z = -1.4;
-        P.body.rotation.x = -0.2;
+        // arms-wide aeroplane spin (drive facing so update() keeps it)
+        this.facing += dt * 4.5;
+        this.root.rotation.y = -this.facing + PI / 2;
+        J.shL.rotation.set(0, 0, 1.45); J.shR.rotation.set(0, 0, -1.45);
+        J.elL.rotation.x = -0.1; J.elR.rotation.x = -0.1;
+        J.spine.rotation.set(-0.15, 0, 0);
+        J.hipL.rotation.x = -0.15; J.hipR.rotation.x = -0.15;
+        J.hips.position.y = 0.92 + Math.abs(Math.sin(t * 4)) * 0.05;
       } else {
-        // running man, arms wide
-        this.animPhase += dt * 14;
-        const sw = Math.sin(this.animPhase) * 1.0;
-        P.legL.pivot.rotation.x = sw; P.legR.pivot.rotation.x = -sw;
-        P.armL.pivot.rotation.x = -1.6; P.armR.pivot.rotation.x = -1.6;
-        P.armL.pivot.rotation.z = 0.8; P.armR.pivot.rotation.z = -0.8;
-        this.root.position.y = Math.abs(Math.sin(this.animPhase)) * 0.1;
+        // knee-slide celebration
+        const slide = U.clamp(t / 0.6, 0, 1);
+        this.root.rotation.x = -0.4 * (1 - U.clamp((t - 1.2) / 0.6, 0, 1));
+        J.hips.position.y = U.lerp(0.92, 0.5, slide) * (1 - 0.3 * U.clamp((t - 1.4) / 0.8, 0, 1)) + 0.3 * U.clamp((t - 1.4) / 0.8, 0, 1) * 0.92;
+        J.hipL.rotation.x = -0.2; J.kneeL.rotation.x = 1.4;
+        J.hipR.rotation.x = -0.9; J.kneeR.rotation.x = 0.3;
+        J.shL.rotation.set(-1.0, 0, 0.9); J.shR.rotation.set(-1.0, 0, -0.9);
+        J.elL.rotation.x = -0.3; J.elR.rotation.x = -0.3;
+        J.head.rotation.x = -0.25;
       }
     }
 
     dispose() { this.scene.remove(this.root); }
   }
 
-  // helper accessor since getters defined after constructor uses _skin
-  function opts_skin(p) { return p._skin; }
-
   let RING_TEX = null;
   function ringTexture() {
     if (RING_TEX) return RING_TEX;
     const { canvas, ctx } = U.makeCanvas(128, 128);
     ctx.clearRect(0, 0, 128, 128);
-    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
-    ctx.lineWidth = 9;
-    ctx.beginPath(); ctx.arc(64, 64, 50, 0, Math.PI * 2); ctx.stroke();
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.lineWidth = 4;
-    ctx.beginPath(); ctx.arc(64, 64, 40, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.95)'; ctx.lineWidth = 9;
+    ctx.beginPath(); ctx.arc(64, 64, 50, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.32)'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(64, 64, 40, 0, TAU); ctx.stroke();
     RING_TEX = new THREE.CanvasTexture(canvas);
     RING_TEX.encoding = THREE.sRGBEncoding;
     return RING_TEX;

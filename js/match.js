@@ -192,8 +192,7 @@ window.GS = window.GS || {};
       // possession & ball
       this._resolvePossession(dt);
       if (this.ball.controlledBy) this._dribble(dt);
-      else if (playing || this.state === 'goal') this.ball.update(dt);
-      else this.ball.update(dt);
+      else { this.ball.update(dt); this._ballBodyCollisions(); }
 
       // boosts
       this._updateBoosts(dt);
@@ -332,46 +331,65 @@ window.GS = window.GS || {};
     shoot(p, dir, charge) {
       const team = this.teams[p.teamId];
       const superShot = team.boost === 'shot';
+      // a first-time volley on an airborne ball is harder but hits harder
+      const volley = this.ball.pos.y > 0.7 && !this.ball.controlledBy;
       const basePow = 17, maxPow = 31;
       let power = U.lerp(basePow, maxPow, charge);
       if (superShot) power *= 1.35;
-      // lift: flatter for tap, a bit of loft when charged
-      const lift = 1.6 + charge * 4.2 + (superShot ? 1.5 : 0);
+      if (volley) power *= 1.18;
+      // lift: flatter for tap, a bit of loft when charged; volleys stay flat
+      let lift = 1.6 + charge * 4.2 + (superShot ? 1.5 : 0);
+      if (volley) lift = 1.0 + charge * 1.6;
       // curve from lateral movement at release
-      const px = -dir.z, pz = dir.x; // perpendicular
+      const px = -dir.z, pz = dir.x;
       const lateral = (p.input.x * px + p.input.z * pz);
       const spin = lateral * (2.2 + charge * 2.5);
-      // small accuracy scatter (less for charged/human)
+      // accuracy scatter (worse on volleys, better when charged)
       const acc = p.attr ? p.attr.shootAcc : 0.9;
-      const scatter = (1 - acc) * 0.12 * (1 - charge * 0.5);
+      const scatter = (1 - acc) * 0.12 * (1 - charge * 0.5) + (volley ? 0.05 : 0);
       const ang = Math.atan2(dir.z, dir.x) + U.rand(-scatter, scatter);
       const sd = { x: Math.cos(ang), z: Math.sin(ang) };
 
-      p.playKick(charge, sd.z * p.attackDir >= 0 ? 1 : -1);
+      p.playKick(Math.max(charge, volley ? 0.7 : 0.4), sd.z * p.attackDir >= 0 ? 1 : -1);
       this.ball.kick(sd, power, lift, spin, p.teamId, p);
       this.ball.outCooldown = 0.05;
       this.ball.setFire(superShot);
       team.shots++;
-      this.audio.kick(charge);
+      this.audio.kick(Math.max(charge, volley ? 0.8 : charge));
       this.particles.shotBlast({ x: this.ball.pos.x, y: this.ball.pos.y, z: this.ball.pos.z }, sd);
+      if (volley) this.shake(0.3);
       if (superShot) { this.shake(0.5); this.particles.sparkBurst(this.ball.pos, '#ff7a1a'); }
       this._kickCooldownFor(p);
     }
 
     passTo(p, mate) {
-      const dx = mate.pos.x - p.pos.x, dz = mate.pos.z - p.pos.z;
-      const d = U.len2(dx, dz);
+      // lead the receiver: aim where they'll be by the time the ball arrives
+      const rough = U.dist2D(p.pos, mate.pos);
+      const travel = U.clamp(rough / 20, 0.1, 0.7);
+      const tx = mate.pos.x + mate.vel.x * travel;
+      const tz = mate.pos.z + mate.vel.z * travel;
+      const dx = tx - p.pos.x, dz = tz - p.pos.z;
+      const d = U.len2(dx, dz) || 1;
       const dir = { x: dx / d, z: dz / d };
-      // lead the receiver a touch
-      const power = U.clamp(d * 1.18, 12, 26);
-      const lift = d > 16 ? 3.2 : 1.4;
-      p.playKick(0.3);
-      this.ball.kick(dir, power, lift, 0, p.teamId, p);
+
+      // is an opponent blocking the ground lane? if so, lift it over them
+      let blocked = false;
+      for (const o of this.teams[1 - p.teamId].players) {
+        if (U.distToSeg2D(o.pos.x, o.pos.z, p.pos.x, p.pos.z, tx, tz) < 1.1 &&
+            U.dist2D(o.pos, p.pos) < d - 1) { blocked = true; break; }
+      }
+      const power = U.clamp(d * 1.16, 12, 27);
+      const lift = blocked ? U.clamp(d * 0.42, 5, 9) : (d > 16 ? 3.0 : 1.3);
+      // tiny outswing so passes bend into the runner's path
+      const px = -dir.z, pz = dir.x;
+      const spin = (mate.vel.x * px + mate.vel.z * pz) * 0.25;
+
+      p.playKick(blocked ? 0.5 : 0.3);
+      this.ball.kick(dir, power, lift, spin, p.teamId, p);
       this.ball.setFire(false);
       this.audio.pass();
       this.particles.grassKick(this.ball.pos, this.ball.vel);
       this._kickCooldownFor(p);
-      // hint the receiver toward the ball
       mate._reactT = 0;
     }
 
@@ -459,6 +477,30 @@ window.GS = window.GS || {};
       }
     }
 
+    // loose ball physically deflects off players that can't trap it right now
+    _ballBodyCollisions() {
+      const ball = this.ball;
+      if (ball.controlledBy) return;
+      if (ball.pos.y > 1.7) return;            // sailing over heads
+      const minD = C.PLAYER_R + ball.radius;
+      for (const team of this.teams) for (const p of team.players) {
+        const canControl = (p._kickCd || 0) <= 0 && p.stunTimer <= 0 && p.fallTimer <= 0;
+        if (canControl) continue;              // those are handled by possession
+        const dx = ball.pos.x - p.pos.x, dz = ball.pos.z - p.pos.z;
+        const d = U.len2(dx, dz);
+        if (d < minD && d > 1e-4) {
+          const nx = dx / d, nz = dz / d;
+          ball.pos.x = p.pos.x + nx * minD;
+          ball.pos.z = p.pos.z + nz * minD;
+          const vn = ball.vel.x * nx + ball.vel.z * nz;
+          if (vn < 0) { ball.vel.x -= 1.6 * vn * nx; ball.vel.z -= 1.6 * vn * nz; }
+          ball.vel.x += p.vel.x * 0.3; ball.vel.z += p.vel.z * 0.3;
+          ball.outCooldown = Math.max(ball.outCooldown, 0.12);
+          if (ball.speed() > 6 && GS.AUDIO) GS.AUDIO.bounce(ball.speed());
+        }
+      }
+    }
+
     _giveBall(p) {
       this.ball.controlledBy = p;
       this.ball.lastTouch = p.teamId;
@@ -531,9 +573,19 @@ window.GS = window.GS || {};
           if (d < minD && d > 1e-4) {
             const push = (minD - d) * 0.5;
             const nx = dx / d, nz = dz / d;
-            // sliding players bowl others over (stun)
-            if (a.slideTimer > 0 && b.slideTimer <= 0 && a.teamId !== b.teamId) b.stun(0.4);
-            if (b.slideTimer > 0 && a.slideTimer <= 0 && a.teamId !== b.teamId) a.stun(0.4);
+            // a sliding player bowls an opponent over (full knock-down + getup)
+            const aSlide = a.slideTimer > 0, bSlide = b.slideTimer > 0;
+            if (aSlide && !bSlide && a.teamId !== b.teamId && b.fallTimer <= 0) {
+              b.knockDown({ x: nx, y: 0, z: nz }, 5.5);
+            } else if (bSlide && !aSlide && a.teamId !== b.teamId && a.fallTimer <= 0) {
+              a.knockDown({ x: -nx, y: 0, z: -nz }, 5.5);
+            } else if (!aSlide && !bSlide) {
+              // shoulder-to-shoulder jostle: faster/heavier player nudges the other
+              const sa = U.len2(a.vel.x, a.vel.z), sb = U.len2(b.vel.x, b.vel.z);
+              if (Math.abs(sa - sb) > 4 && a.teamId !== b.teamId) {
+                (sa > sb ? b : a).stun(0.18);
+              }
+            }
             a.pos.x -= nx * push; a.pos.z -= nz * push;
             b.pos.x += nx * push; b.pos.z += nz * push;
           }

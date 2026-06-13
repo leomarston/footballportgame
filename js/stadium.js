@@ -210,26 +210,31 @@ window.GS = window.GS || {};
   // ------------------------------------------------------------------
   // crowd (GPU points)
   // ------------------------------------------------------------------
+  // Generic crowd builder. Each stand: { fx,fz, ang (inward-normal angle),
+  // len, steps, stepBack, stepUp, baseY, homeBias }. Seats tier outward
+  // (-normal) and up. ~6% of fans pop a white camera flash.
   function buildCrowd(scene, stands, homeColor, awayColor) {
-    const positions = [], colors = [], heads = [], phases = [], amps = [];
+    const positions = [], colors = [], heads = [], phases = [], amps = [], flashes = [];
     const homeC = new THREE.Color(homeColor), awayC = new THREE.Color(awayColor);
     const neutrals = ['#e8e8e8', '#d9c46a', '#7a8aa0', '#4a4a55', '#c46a6a', '#6ac4a0'].map(c => new THREE.Color(c));
     const skins = GS.SKINS.map(c => new THREE.Color(c));
     const tmp = new THREE.Color();
+    const spacing = 0.92;
 
     for (const st of stands) {
+      const nx = Math.cos(st.ang), nz = Math.sin(st.ang);   // inward normal
+      const tx = -nz, tz = nx;                              // tangent
+      const cols = Math.max(1, Math.floor(st.len / spacing));
       for (let step = 0; step < st.steps; step++) {
-        const t = step / (st.steps - 1);
-        const y = st.baseY + step * st.stepH + 0.95;
-        const off = st.baseOff + step * st.stepD + st.stepD * 0.4;
-        const n = Math.floor(st.len / 0.95);
-        for (let i = 0; i < n; i++) {
-          if (Math.random() < 0.12) continue; // empty seats
-          const along = -st.len / 2 + (i + 0.5) * (st.len / n) + U.rand(-0.18, 0.18);
-          let x, z;
-          if (st.axis === 'z') { x = along; z = st.dir * off; }
-          else { x = st.dir * off; z = along; }
-          positions.push(x, y + U.rand(-0.05, 0.08), z);
+        const backDist = step * st.stepBack + st.stepBack * 0.4;
+        const y = st.baseY + step * st.stepUp + 0.95;
+        const rcx = st.fx - nx * backDist, rcz = st.fz - nz * backDist;
+        for (let i = 0; i < cols; i++) {
+          if (Math.random() < 0.1) continue; // empty seats
+          const along = -st.len / 2 + (i + 0.5) * spacing + U.rand(-0.16, 0.16);
+          positions.push(rcx + tx * along + U.rand(-0.1, 0.1),
+                         y + U.rand(-0.05, 0.08),
+                         rcz + tz * along + U.rand(-0.1, 0.1));
           const r = Math.random();
           if (r < st.homeBias) tmp.copy(homeC).offsetHSL(U.rand(-0.02, 0.02), U.rand(-0.1, 0.1), U.rand(-0.14, 0.1));
           else if (r < st.homeBias + 0.18) tmp.copy(awayC).offsetHSL(0, 0, U.rand(-0.12, 0.08));
@@ -239,6 +244,7 @@ window.GS = window.GS || {};
           heads.push(sk.r, sk.g, sk.b);
           phases.push(U.rand(0, Math.PI * 2));
           amps.push(U.rand(0.4, 1));
+          flashes.push(Math.random() < 0.06 ? U.rand(0, 100) : -1);
         }
       }
     }
@@ -249,49 +255,43 @@ window.GS = window.GS || {};
     geo.setAttribute('aHead', new THREE.Float32BufferAttribute(heads, 3));
     geo.setAttribute('aPhase', new THREE.Float32BufferAttribute(phases, 1));
     geo.setAttribute('aAmp', new THREE.Float32BufferAttribute(amps, 1));
+    geo.setAttribute('aFlash', new THREE.Float32BufferAttribute(flashes, 1));
 
     const mat = new THREE.ShaderMaterial({
-      uniforms: {
-        uTime: { value: 0 },
-        uExcite: { value: 0.15 },
-        uScale: { value: 1 },
-      },
+      uniforms: { uTime: { value: 0 }, uExcite: { value: 0.15 }, uScale: { value: 1 } },
       vertexShader: `
-        attribute vec3 aColor;
-        attribute vec3 aHead;
-        attribute float aPhase;
-        attribute float aAmp;
-        uniform float uTime;
-        uniform float uExcite;
-        uniform float uScale;
-        varying vec3 vColor;
-        varying vec3 vHead;
+        attribute vec3 aColor; attribute vec3 aHead;
+        attribute float aPhase; attribute float aAmp; attribute float aFlash;
+        uniform float uTime; uniform float uExcite; uniform float uScale;
+        varying vec3 vColor; varying vec3 vHead; varying float vFlash;
         void main(){
-          vColor = aColor;
-          vHead = aHead;
+          vColor = aColor; vHead = aHead;
           vec3 p = position;
           float speed = 2.2 + uExcite * 9.0;
           float bounce = max(0.0, sin(uTime * speed + aPhase));
           p.y += bounce * aAmp * (0.05 + uExcite * 0.55);
+          // camera flash: brief spike, rarer when calm
+          vFlash = 0.0;
+          if (aFlash >= 0.0) {
+            float ph = fract(uTime * (0.35 + uExcite * 0.5) + aFlash);
+            vFlash = smoothstep(0.93, 1.0, ph) * (1.0 - smoothstep(1.0, 1.04, ph));
+          }
           vec4 mv = modelViewMatrix * vec4(p, 1.0);
           gl_Position = projectionMatrix * mv;
           gl_PointSize = uScale * 1100.0 / max(1.0, -mv.z);
         }`,
       fragmentShader: `
-        varying vec3 vColor;
-        varying vec3 vHead;
+        varying vec3 vColor; varying vec3 vHead; varying float vFlash;
         void main(){
           vec2 q = gl_PointCoord;
-          // head
-          float dh = length((q - vec2(0.5, 0.24)) * vec2(1.0, 1.0));
-          // body (rounded shoulders)
+          float dh = length((q - vec2(0.5, 0.24)));
           float db = length((q - vec2(0.5, 0.72)) * vec2(1.15, 0.85));
-          if (dh < 0.16) {
-            gl_FragColor = vec4(vHead * (q.y < 0.20 ? 0.55 : 1.0), 1.0);
-          } else if (db < 0.34 && q.y > 0.34) {
-            float sh = 1.0 - (q.y - 0.34) * 0.5;
-            gl_FragColor = vec4(vColor * sh, 1.0);
-          } else discard;
+          vec3 col;
+          if (dh < 0.16) col = vHead * (q.y < 0.20 ? 0.55 : 1.0);
+          else if (db < 0.34 && q.y > 0.34) col = vColor * (1.0 - (q.y - 0.34) * 0.5);
+          else discard;
+          col = mix(col, vec3(2.4), vFlash);
+          gl_FragColor = vec4(col, 1.0);
         }`,
     });
     const pts = new THREE.Points(geo, mat);
@@ -311,17 +311,22 @@ window.GS = window.GS || {};
       this.adTimer = 9;
       this.adOffset = 0;
 
-      scene.fog = new THREE.Fog(0xcfe0ee, 170, 520);
+      this.homeTeam = homeTeam; this.awayTeam = awayTeam;
+      scene.fog = new THREE.Fog(0xcfe0ee, 190, 540);
       this.sky = GS.createSky(scene);
       this._lights();
       this._ground();
       this._goals();
       this._standsAndCrowd(homeTeam, awayTeam);
+      this._jumbotron();
+      this._tifo(homeTeam, awayTeam);
+      this._dugouts(homeTeam, awayTeam);
       this._adBoards();
       this._floodlights();
       this._blimp();
       this._scenery();
       this._flags();
+      this._drawJumbo(homeTeam.abbr, awayTeam.abbr, '0', '0', homeTeam.c1, awayTeam.c1, '00:00');
     }
 
     _lights() {
@@ -447,66 +452,209 @@ window.GS = window.GS || {};
     }
 
     _standsAndCrowd(homeTeam, awayTeam) {
+      const c = (x, z) => Math.atan2(-z, -x); // inward-normal angle toward centre
+      const SB = 1.3, SU = 0.62, BY = 1.4;
+      // continuous bowl: 2 long stands, 2 end stands, 4 corner fillers
       const stands = [
-        // long sides
-        { axis: 'z', dir: -1, baseOff: 33, len: 86, steps: 11, stepD: 1.25, stepH: 0.6, baseY: 1.4, homeBias: 0.55 },
-        { axis: 'z', dir: 1, baseOff: 33, len: 86, steps: 11, stepD: 1.25, stepH: 0.6, baseY: 1.4, homeBias: 0.55 },
-        // behind goals
-        { axis: 'x', dir: -1, baseOff: 47, len: 56, steps: 9, stepD: 1.25, stepH: 0.6, baseY: 1.4, homeBias: 0.75 },
-        { axis: 'x', dir: 1, baseOff: 47, len: 56, steps: 9, stepD: 1.25, stepH: 0.6, baseY: 1.4, homeBias: 0.2 },
+        { fx: 0, fz: 25, ang: c(0, 25), len: 58, steps: 14, homeBias: 0.55, kind: 'long' },
+        { fx: 0, fz: -25, ang: c(0, -25), len: 58, steps: 14, homeBias: 0.55, kind: 'long' },
+        { fx: 38, fz: 0, ang: c(38, 0), len: 46, steps: 12, homeBias: 0.78, kind: 'end' },
+        { fx: -38, fz: 0, ang: c(-38, 0), len: 46, steps: 12, homeBias: 0.2, kind: 'end' },
       ];
-      const conMat = new THREE.MeshLambertMaterial({ color: 0x9aa6b5 });
-      const conMatDark = new THREE.MeshLambertMaterial({ color: 0x77828f });
-      const roofMat = new THREE.MeshLambertMaterial({ color: 0x3b4754 });
-
-      for (const st of stands) {
-        const group = new THREE.Group();
-        const depth = st.steps * st.stepD;
-        // stepped terraces as a few merged slabs for simplicity
-        for (let i = 0; i < st.steps; i++) {
-          const w = st.axis === 'z' ? st.len : st.stepD;
-          const d = st.axis === 'z' ? st.stepD : st.len;
-          const slab = new THREE.Mesh(new THREE.BoxGeometry(
-            st.axis === 'z' ? st.len : st.stepD, st.stepH + i * st.stepH, st.axis === 'z' ? st.stepD : st.len
-          ), i % 2 ? conMat : conMatDark);
-          const off = st.baseOff + i * st.stepD + st.stepD / 2;
-          const y = st.baseY + (st.stepH + i * st.stepH) / 2;
-          if (st.axis === 'z') slab.position.set(0, y, st.dir * off);
-          else slab.position.set(st.dir * off, y, 0);
-          group.add(slab);
-        }
-        // back wall
-        const wallH = st.baseY + st.steps * st.stepH + 2.5;
-        const wall = new THREE.Mesh(new THREE.BoxGeometry(
-          st.axis === 'z' ? st.len + 2 : 1.2, wallH, st.axis === 'z' ? 1.2 : st.len + 2
-        ), conMatDark);
-        const woff = st.baseOff + depth + 0.6;
-        if (st.axis === 'z') wall.position.set(0, wallH / 2, st.dir * woff);
-        else wall.position.set(st.dir * woff, wallH / 2, 0);
-        group.add(wall);
-
-        // roof
-        const roofW = st.axis === 'z' ? st.len + 4 : depth + 5;
-        const roofD = st.axis === 'z' ? depth + 5 : st.len + 4;
-        const roof = new THREE.Mesh(new THREE.BoxGeometry(roofW, 0.5, roofD), roofMat);
-        const roofOff = st.baseOff + depth / 2 + 1;
-        const roofY = wallH + 2.2;
-        if (st.axis === 'z') { roof.position.set(0, roofY, st.dir * roofOff); roof.rotation.x = st.dir * 0.1; }
-        else { roof.position.set(st.dir * roofOff, roofY, 0); roof.rotation.z = -st.dir * 0.1; }
-        group.add(roof);
-
-        // roof support columns
-        for (let i = -1; i <= 1; i++) {
-          const col = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, roofY, 8), conMatDark);
-          const along = i * ((st.axis === 'z' ? st.len : st.len) / 2 - 4);
-          if (st.axis === 'z') col.position.set(along, roofY / 2, st.dir * (st.baseOff + depth + 1));
-          else col.position.set(st.dir * (st.baseOff + depth + 1), roofY / 2, along);
-          group.add(col);
-        }
-        this.scene.add(group);
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+        const fx = sx * 31, fz = sz * 22;
+        stands.push({ fx, fz, ang: c(fx, fz), len: 30, steps: 12, homeBias: 0.5, kind: 'corner' });
       }
+      stands.forEach(s => { s.stepBack = SB; s.stepUp = SU; s.baseY = BY; });
+
+      const mats = {
+        a: new THREE.MeshLambertMaterial({ color: 0x9aa6b5 }),
+        b: new THREE.MeshLambertMaterial({ color: 0x77828f }),
+        roof: new THREE.MeshLambertMaterial({ color: 0x394452 }),
+        dark: new THREE.MeshLambertMaterial({ color: 0x20262f }),
+        edge: new THREE.MeshToonMaterial({ color: 0x27e07f, gradientMap: Stadium.toon() }),
+      };
+      this._standMats = mats;
+      for (const st of stands) this._buildStand(st, mats);
 
       this.crowd = buildCrowd(this.scene, stands, homeTeam.c1, awayTeam.c1);
+    }
+
+    _buildStand(st, m) {
+      const g = new THREE.Group();
+      const { len, steps, stepBack, stepUp, baseY } = st;
+      const depth = steps * stepBack;
+      // tiered terraces (local +z = outward/up, front at z=0, seats face -z)
+      for (let i = 0; i < steps; i++) {
+        const h = stepUp + i * stepUp;
+        const slab = new THREE.Mesh(new THREE.BoxGeometry(len, h, stepBack + 0.03), i % 2 ? m.a : m.b);
+        slab.position.set(0, baseY + h / 2, i * stepBack + stepBack / 2);
+        slab.receiveShadow = true;
+        g.add(slab);
+      }
+      // front facade + accent rail
+      const facade = new THREE.Mesh(new THREE.BoxGeometry(len, baseY + 0.4, 0.5), m.b);
+      facade.position.set(0, (baseY + 0.4) / 2, -0.25); g.add(facade);
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(len, 0.18, 0.16), m.edge);
+      rail.position.set(0, baseY + 0.45, -0.3); g.add(rail);
+      // back wall + vomitory entrances
+      const wallH = baseY + steps * stepUp + 3.2;
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(len + 2, wallH, 1.0), m.b);
+      wall.position.set(0, wallH / 2, depth + 0.5); g.add(wall);
+      for (let k = -1; k <= 1; k += 2) {
+        const vom = new THREE.Mesh(new THREE.BoxGeometry(3.2, 3.4, 0.7), m.dark);
+        vom.position.set(k * len * 0.26, 1.9, depth * 0.55); g.add(vom);
+      }
+      // cantilever roof + bright leading edge + columns
+      const roof = new THREE.Mesh(new THREE.BoxGeometry(len + 4, 0.5, depth + 5.5), m.roof);
+      roof.position.set(0, wallH + 2.0, depth / 2 - 0.5); roof.rotation.x = -0.1; g.add(roof);
+      const redge = new THREE.Mesh(new THREE.BoxGeometry(len + 4, 0.45, 0.5), m.edge);
+      redge.position.set(0, wallH + 1.45, -1.9); g.add(redge);
+      const underside = new THREE.Mesh(new THREE.BoxGeometry(len + 3, 0.2, depth + 4), m.dark);
+      underside.position.set(0, wallH + 1.7, depth / 2 - 0.5); underside.rotation.x = -0.1; g.add(underside);
+      for (let cI = -1; cI <= 1; cI++) {
+        const col = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.34, wallH + 2, 8), m.b);
+        col.position.set(cI * (len / 2 - 2), (wallH + 2) / 2, depth + 0.3); g.add(col);
+      }
+      g.position.set(st.fx, 0, st.fz);
+      g.rotation.y = -st.ang - Math.PI / 2;
+      this.scene.add(g);
+      return g;
+    }
+
+    _jumbotron() {
+      this.jumbos = [];
+      const { canvas, ctx } = U.makeCanvas(512, 320);
+      this.jumboCanvas = canvas; this.jumboCtx = ctx;
+      this.jumboTex = new THREE.CanvasTexture(canvas);
+      this.jumboTex.encoding = THREE.sRGBEncoding;
+      this._jumboKey = '';
+      const screenMat = new THREE.MeshBasicMaterial({ map: this.jumboTex });
+      const frameMat = new THREE.MeshLambertMaterial({ color: 0x14181f });
+      const trussMat = new THREE.MeshLambertMaterial({ color: 0x2a3038 });
+      for (const sx of [-1, 1]) {
+        const g = new THREE.Group();
+        const frame = new THREE.Mesh(new THREE.BoxGeometry(13, 8.4, 0.8), frameMat);
+        frame.position.y = 0; g.add(frame);
+        const screen = new THREE.Mesh(new THREE.PlaneGeometry(12, 7.5), screenMat);
+        screen.position.z = 0.45; g.add(screen);
+        const back = new THREE.Mesh(new THREE.PlaneGeometry(12, 7.5), screenMat);
+        back.position.z = -0.45; back.rotation.y = Math.PI; g.add(back);
+        // gantry truss
+        for (const tx of [-5.5, 5.5]) {
+          const leg = new THREE.Mesh(new THREE.BoxGeometry(0.5, 18, 0.5), trussMat);
+          leg.position.set(tx, -13, -0.6); g.add(leg);
+        }
+        const beam = new THREE.Mesh(new THREE.BoxGeometry(12, 0.5, 0.5), trussMat);
+        beam.position.set(0, -4.4, -0.6); g.add(beam);
+        g.position.set(sx * 47, 19, 0);
+        g.rotation.y = sx > 0 ? -Math.PI / 2 : Math.PI / 2;
+        this.scene.add(g);
+        this.jumbos.push(g);
+      }
+    }
+
+    _drawJumbo(abbrA, abbrB, a, b, cA, cB, clock) {
+      const ctx = this.jumboCtx;
+      ctx.fillStyle = '#070b14'; ctx.fillRect(0, 0, 512, 320);
+      // pixel-grid LED feel
+      ctx.fillStyle = 'rgba(255,255,255,0.02)';
+      for (let y = 0; y < 320; y += 4) ctx.fillRect(0, y, 512, 1);
+      // header
+      ctx.fillStyle = '#27e07f';
+      ctx.font = 'italic 900 34px "Arial Black", Arial, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('GOALSTORM', 256, 36);
+      // score row
+      ctx.fillStyle = cA; ctx.fillRect(40, 90, 150, 150);
+      ctx.fillStyle = cB; ctx.fillRect(322, 90, 150, 150);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '900 44px "Arial Black", Arial, sans-serif';
+      ctx.fillText(abbrA, 115, 120);
+      ctx.fillText(abbrB, 397, 120);
+      ctx.font = '900 110px "Arial Black", Arial, sans-serif';
+      ctx.fillText(a, 115, 185);
+      ctx.fillText(b, 397, 185);
+      ctx.fillStyle = '#ffd23f';
+      ctx.font = '900 40px "Consolas", monospace';
+      ctx.fillText(clock || '00:00', 256, 165);
+      // live tag
+      ctx.fillStyle = '#ff4d6d';
+      ctx.beginPath(); ctx.arc(210, 285, 9, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = '900 26px "Arial Black", Arial, sans-serif';
+      ctx.fillText('LIVE', 256, 286);
+      this.jumboTex.needsUpdate = true;
+    }
+
+    _tifo(homeTeam, awayTeam) {
+      this.tifos = [];
+      const mk = (team, word) => {
+        const { canvas, ctx } = U.makeCanvas(256, 64);
+        ctx.fillStyle = team.c1; ctx.fillRect(0, 0, 256, 64);
+        ctx.fillStyle = team.c2; ctx.fillRect(0, 0, 256, 8); ctx.fillRect(0, 56, 256, 8);
+        ctx.fillStyle = team.c2;
+        ctx.font = 'italic 900 38px "Arial Black", Arial, sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(word, 128, 34);
+        const t = U.canvasTexture(canvas);
+        const mat = new THREE.MeshBasicMaterial({ map: t, side: THREE.DoubleSide });
+        mat.color.setScalar(0.9);
+        return mat;
+      };
+      const place = (team, word, x, z, ry, count) => {
+        const mat = mk(team, word);
+        for (let i = 0; i < count; i++) {
+          const banner = new THREE.Mesh(new THREE.PlaneGeometry(7, 1.7), mat);
+          banner.position.set(x + (i - (count - 1) / 2) * 8.5 * Math.cos(ry), 2.6,
+                              z + (i - (count - 1) / 2) * 8.5 * -Math.sin(ry));
+          banner.rotation.y = ry;
+          this.scene.add(banner);
+          this.tifos.push({ mesh: banner, base: banner.position.y, ph: U.rand(0, 6) });
+        }
+      };
+      place(homeTeam, 'ULTRAS', 0, 24.2, 0, 3);
+      place(awayTeam, 'AWAY END', 37.2, 0, Math.PI / 2, 2);
+    }
+
+    _dugouts(homeTeam, awayTeam) {
+      const mk = (team, x) => {
+        const g = new THREE.Group();
+        const roof = new THREE.Mesh(new THREE.BoxGeometry(7, 0.25, 2.6),
+          new THREE.MeshToonMaterial({ color: U.shade(team.c1, 0.7), gradientMap: Stadium.toon() }));
+        roof.position.set(0, 2.05, 0); roof.castShadow = true; g.add(roof);
+        const back = new THREE.Mesh(new THREE.BoxGeometry(7, 2.0, 0.2),
+          new THREE.MeshLambertMaterial({ color: 0x2a3038 }));
+        back.position.set(0, 1.0, 1.2); g.add(back);
+        for (const px of [-2.6, 2.6]) {
+          const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 2.0, 6),
+            new THREE.MeshLambertMaterial({ color: 0x394452 }));
+          post.position.set(px, 1.0, -1.1); g.add(post);
+        }
+        const bench = new THREE.Mesh(new THREE.BoxGeometry(6.4, 0.4, 0.5),
+          new THREE.MeshLambertMaterial({ color: 0x1b2026 }));
+        bench.position.set(0, 0.5, 0.2); g.add(bench);
+        // seated substitutes
+        const jersey = new THREE.MeshToonMaterial({ color: team.c1, gradientMap: Stadium.toon() });
+        for (let i = 0; i < 4; i++) {
+          const sub = new THREE.Group();
+          const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, 0.45, 8), jersey);
+          torso.position.y = 0.95; torso.castShadow = true; sub.add(torso);
+          const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8),
+            new THREE.MeshToonMaterial({ color: new THREE.Color(U.choice(GS.SKINS)), gradientMap: Stadium.toon() }));
+          head.position.y = 1.32; sub.add(head);
+          const legs = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.22, 0.5),
+            new THREE.MeshToonMaterial({ color: team.short, gradientMap: Stadium.toon() }));
+          legs.position.set(0, 0.62, 0.22); sub.add(legs);
+          sub.position.set(-2.4 + i * 1.6, 0, 0.2);
+          g.add(sub);
+        }
+        g.position.set(x, 0, 23.5);
+        g.rotation.y = Math.PI; // face the pitch (-z)
+        this.scene.add(g);
+      };
+      mk(homeTeam, -8);
+      mk(awayTeam, 8);
     }
 
     _adBoards() {
@@ -711,6 +859,25 @@ window.GS = window.GS || {};
       // flag flutter
       for (let i = 0; i < this.flagMeshes.length; i++) {
         this.flagMeshes[i].rotation.y = Math.sin(this.t * 5 + i * 1.7) * 0.4;
+      }
+
+      // tifo sway
+      if (this.tifos) for (const tf of this.tifos) {
+        tf.mesh.position.y = tf.base + Math.sin(this.t * 1.6 + tf.ph) * 0.12;
+        tf.mesh.rotation.z = Math.sin(this.t * 1.2 + tf.ph) * 0.04;
+      }
+
+      // live jumbotron (only redraw when the displayed values change)
+      if (this.jumboCtx && GS.MATCH) {
+        const m = GS.MATCH;
+        const clock = (document.getElementById('sb-clock') || {}).textContent || '00:00';
+        const key = m.teams[0].score + '|' + m.teams[1].score + '|' + clock;
+        if (key !== this._jumboKey) {
+          this._jumboKey = key;
+          this._drawJumbo(this.homeTeam.abbr, this.awayTeam.abbr,
+            String(m.teams[0].score), String(m.teams[1].score),
+            this.homeTeam.c1, this.awayTeam.c1, clock);
+        }
       }
 
       // ad rotation
