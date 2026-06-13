@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>GOALSTORM — Arcade Football</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%2327e07f'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle' font-family='Arial Black' font-weight='900' fill='%2306121c'%3EG%3C/text%3E%3C/svg%3E">
+<meta name="theme-color" content="#04070d">
+<meta name="description" content="GOALSTORM — a fast, arcade browser football game with charged shots, curve, AI teammates, power-ups and big-stadium presentation.">
+
+<style>
+:root{
+  --accent:#27e07f;
+  --accent2:#ffd23f;
+  --danger:#ff4d6d;
+  --ink:#eaf6ff;
+  --panel:rgba(10,16,28,.82);
+  --panel2:rgba(16,26,44,.92);
+  --blur:14px;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+html,body{width:100%;height:100%;overflow:hidden;background:#04070d;
+  font-family:"Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;color:var(--ink)}
+canvas#game-canvas{position:fixed;inset:0;width:100%;height:100%;display:block;outline:none}
+
+/* ============ generic UI ============ */
+#ui{position:fixed;inset:0;pointer-events:none;overflow:hidden}
+.screen{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  pointer-events:auto;opacity:0;visibility:hidden;transition:opacity .35s ease}
+.screen.show{opacity:1;visibility:visible}
+.dim{background:radial-gradient(120% 90% at 50% 20%, rgba(5,10,20,.25) 0%, rgba(3,6,12,.78) 100%)}
+
+.btn{
+  position:relative;display:inline-block;padding:14px 44px;margin:8px;cursor:pointer;border:0;
+  font:italic 800 21px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:2px;color:#06121c;text-transform:uppercase;
+  background:linear-gradient(180deg,#3df59b,#16c970);transform:skewX(-12deg);
+  border-radius:6px;box-shadow:0 6px 0 #0a7c45, 0 14px 30px rgba(0,0,0,.45);
+  transition:transform .12s ease, box-shadow .12s ease, filter .12s ease}
+.btn>span{display:inline-block;transform:skewX(12deg)}
+.btn:hover,.btn.sel{filter:brightness(1.12);transform:skewX(-12deg) translateY(-2px);box-shadow:0 8px 0 #0a7c45,0 18px 36px rgba(0,0,0,.5)}
+.btn:active{transform:skewX(-12deg) translateY(3px);box-shadow:0 3px 0 #0a7c45,0 8px 18px rgba(0,0,0,.5)}
+.btn.alt{background:linear-gradient(180deg,#ffe066,#ffb13f);box-shadow:0 6px 0 #9c5f12,0 14px 30px rgba(0,0,0,.45)}
+.btn.alt:hover{box-shadow:0 8px 0 #9c5f12,0 18px 36px rgba(0,0,0,.5)}
+.btn.ghost{background:rgba(255,255,255,.08);color:var(--ink);box-shadow:0 6px 0 rgba(255,255,255,.08),0 14px 30px rgba(0,0,0,.35);
+  border:1px solid rgba(255,255,255,.18)}
+.btn.small{padding:9px 26px;font-size:15px}
+
+.hint{margin-top:26px;font-size:13px;letter-spacing:3px;opacity:.55;text-transform:uppercase}
+.panel{background:var(--panel);border:1px solid rgba(255,255,255,.09);border-radius:18px;
+  padding:30px 44px;backdrop-filter:blur(var(--blur));-webkit-backdrop-filter:blur(var(--blur));
+  box-shadow:0 30px 80px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.08)}
+.htitle{font:italic 900 30px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:4px;text-transform:uppercase;margin-bottom:6px}
+.hsub{font-size:13px;letter-spacing:3px;text-transform:uppercase;opacity:.55;margin-bottom:22px}
+
+/* ============ title ============ */
+#logo{position:relative;text-align:center;margin-bottom:8px}
+#logo .big{
+  font:italic 900 clamp(58px,11vw,124px)/0.95 "Arial Black","Segoe UI",sans-serif;letter-spacing:2px;
+  background:linear-gradient(180deg,#fff 18%,#aef3cf 40%,#27e07f 62%,#0d7d4b 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 6px 0 rgba(3,40,22,.85)) drop-shadow(0 18px 38px rgba(0,0,0,.6));
+  transform:skewX(-7deg)}
+#logo .small{font:italic 800 clamp(13px,2vw,19px)/1 "Segoe UI",sans-serif;letter-spacing:14px;color:#ffd23f;
+  text-transform:uppercase;margin-top:10px;text-shadow:0 2px 0 rgba(0,0,0,.7),0 8px 24px rgba(0,0,0,.6)}
+#press{margin-top:46px;font:italic 800 20px/1 "Segoe UI",sans-serif;letter-spacing:6px;text-transform:uppercase;
+  animation:pulse 1.4s ease-in-out infinite;text-shadow:0 2px 8px rgba(0,0,0,.8)}
+@keyframes pulse{0%,100%{opacity:.25}50%{opacity:1}}
+.credit{position:absolute;bottom:18px;width:100%;text-align:center;font-size:11px;letter-spacing:2px;opacity:.4;text-transform:uppercase}
+
+/* ============ team select ============ */
+#team-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:8px}
+.tcard{position:relative;width:148px;padding:16px 10px 12px;border-radius:14px;cursor:pointer;text-align:center;
+  background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.02));
+  border:2px solid rgba(255,255,255,.1);transition:all .15s ease}
+.tcard:hover{transform:translateY(-4px);border-color:rgba(255,255,255,.4);background:linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,.04))}
+.tcard.p1{border-color:var(--accent);box-shadow:0 0 24px rgba(39,224,127,.35)}
+.tcard.p2{border-color:var(--danger);box-shadow:0 0 24px rgba(255,77,109,.35)}
+.tcard.dis{opacity:.35;pointer-events:none}
+.kit{width:64px;height:58px;margin:0 auto 10px;position:relative}
+.kit .body{position:absolute;left:10px;right:10px;top:6px;bottom:0;border-radius:8px 8px 5px 5px}
+.kit .sl,.kit .sr{position:absolute;top:7px;width:16px;height:24px;border-radius:5px}
+.kit .sl{left:-2px;transform:rotate(14deg)}.kit .sr{right:-2px;transform:rotate(-14deg)}
+.kit .stripe{position:absolute;left:46%;top:6px;bottom:0;width:8px;opacity:.9}
+.tname{font:800 13px/1.2 "Segoe UI",sans-serif;letter-spacing:1px;text-transform:uppercase}
+.ttag{font-size:10px;opacity:.5;letter-spacing:2px;margin-top:3px}
+#pick-label{font:italic 800 18px/1 "Segoe UI",sans-serif;letter-spacing:3px;margin-bottom:14px;text-transform:uppercase}
+#pick-label .p1c{color:var(--accent)} #pick-label .p2c{color:var(--danger)}
+
+/* ============ HUD ============ */
+#hud{position:absolute;inset:0;opacity:0;transition:opacity .4s;pointer-events:none}
+#hud.show{opacity:1}
+#scoreboard{position:absolute;top:18px;left:50%;transform:translateX(-50%);display:flex;align-items:stretch;
+  filter:drop-shadow(0 10px 24px rgba(0,0,0,.55))}
+.sb-chip{display:flex;align-items:center;gap:8px;padding:8px 18px;transform:skewX(-12deg);border-radius:6px 0 0 6px}
+.sb-chip.right{border-radius:0 6px 6px 0}
+.sb-chip .dot{width:13px;height:13px;border-radius:3px;transform:skewX(12deg);box-shadow:0 0 0 2px rgba(255,255,255,.35)}
+.sb-chip .ab{font:italic 900 19px/1 "Segoe UI",sans-serif;letter-spacing:2px;transform:skewX(12deg);color:#fff;text-shadow:0 2px 3px rgba(0,0,0,.5)}
+#sb-mid{display:flex;align-items:center;gap:12px;padding:8px 20px;background:linear-gradient(180deg,#101b2e,#0a1322);
+  transform:skewX(-12deg);border-top:1px solid rgba(255,255,255,.14)}
+#sb-mid .sc{font:900 26px/1 "Arial Black",sans-serif;color:#fff;transform:skewX(12deg);min-width:24px;text-align:center}
+#sb-mid .dash{opacity:.4;transform:skewX(12deg);font-weight:900}
+#sb-clockwrap{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:6px 16px;
+  background:linear-gradient(180deg,#16233a,#0c1626);transform:skewX(-12deg);border-radius:0 6px 6px 0;
+  border-top:1px solid rgba(255,255,255,.12)}
+#sb-clock{font:800 17px/1 "Consolas","Segoe UI",monospace;color:var(--accent2);transform:skewX(12deg)}
+#sb-half{font:700 9px/1 "Segoe UI",sans-serif;letter-spacing:2px;opacity:.6;transform:skewX(12deg);margin-top:3px;text-transform:uppercase}
+
+#banner{position:absolute;top:34%;width:100%;text-align:center;pointer-events:none}
+#banner .big{display:inline-block;font:italic 900 clamp(54px,9vw,110px)/1 "Arial Black",sans-serif;letter-spacing:4px;color:#fff;
+  text-transform:uppercase;opacity:0;transform:scale(.6);
+  background:linear-gradient(180deg,#fff 25%,#ffd23f 60%,#ff8c1a 100%);-webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 5px 0 rgba(60,20,0,.85)) drop-shadow(0 16px 40px rgba(0,0,0,.65))}
+#banner .sub{font:italic 800 clamp(15px,2.4vw,24px)/1 "Segoe UI",sans-serif;letter-spacing:6px;color:#fff;margin-top:14px;
+  text-transform:uppercase;opacity:0;text-shadow:0 2px 6px rgba(0,0,0,.8)}
+#banner.show .big{animation:bannerIn .55s cubic-bezier(.2,1.6,.35,1) forwards}
+#banner.show .sub{animation:subIn .5s .12s ease forwards}
+@keyframes bannerIn{0%{opacity:0;transform:scale(.5) translateY(28px)}100%{opacity:1;transform:scale(1) translateY(0)}}
+@keyframes subIn{0%{opacity:0;transform:translateY(14px)}100%{opacity:1;transform:translateY(0)}}
+
+#powerwrap{position:absolute;bottom:42px;left:50%;transform:translateX(-50%) skewX(-12deg);width:240px;height:16px;
+  background:rgba(5,10,18,.75);border:1px solid rgba(255,255,255,.25);border-radius:4px;opacity:0;transition:opacity .12s}
+#powerwrap.show{opacity:1}
+#powerbar{height:100%;width:0%;border-radius:3px;background:linear-gradient(90deg,#27e07f,#ffd23f 60%,#ff4d2e);transition:none}
+
+#boosts{position:absolute;top:86px;left:50%;transform:translateX(-50%);display:flex;gap:10px}
+.bicon{padding:5px 14px;border-radius:20px;font:800 12px/1 "Segoe UI",sans-serif;letter-spacing:1.5px;text-transform:uppercase;
+  background:rgba(8,14,26,.8);border:1px solid rgba(255,255,255,.25);display:none}
+.bicon.show{display:block;animation:pop .3s cubic-bezier(.2,1.8,.4,1)}
+@keyframes pop{0%{transform:scale(.4)}100%{transform:scale(1)}}
+
+#toast{position:absolute;bottom:96px;width:100%;text-align:center;font:italic 800 18px/1 "Segoe UI",sans-serif;
+  letter-spacing:3px;text-transform:uppercase;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,.9);opacity:0;transition:opacity .3s}
+#toast.show{opacity:1}
+
+#ctl-hint{position:absolute;bottom:14px;right:18px;font-size:11px;letter-spacing:1.5px;opacity:.45;text-align:right;line-height:1.7;text-transform:uppercase}
+
+/* ============ fulltime ============ */
+#ft-score{font:italic 900 64px/1 "Arial Black",sans-serif;margin:8px 0 2px;letter-spacing:2px}
+#ft-result{font:italic 800 22px/1 "Segoe UI",sans-serif;letter-spacing:4px;color:var(--accent2);text-transform:uppercase;margin-bottom:18px}
+#ft-stats{display:grid;grid-template-columns:1fr auto 1fr;gap:6px 22px;font-size:14px;margin-bottom:22px;min-width:300px}
+#ft-stats .l{text-align:right;font-weight:800}
+#ft-stats .m{opacity:.55;letter-spacing:1px;text-transform:uppercase;font-size:11px;align-self:center}
+#ft-stats .r{text-align:left;font-weight:800}
+
+/* ============ pause ============ */
+.prow{display:flex;align-items:center;gap:14px;margin:8px 0}
+.prow .lab{width:110px;text-align:right;font-size:13px;letter-spacing:2px;opacity:.65;text-transform:uppercase}
+.seg{display:flex;border:1px solid rgba(255,255,255,.2);border-radius:8px;overflow:hidden}
+.seg button{padding:8px 18px;border:0;background:transparent;color:var(--ink);font:700 13px "Segoe UI",sans-serif;
+  letter-spacing:1px;cursor:pointer;text-transform:uppercase}
+.seg button.on{background:var(--accent);color:#06121c}
+
+#vignette-edge{position:fixed;inset:0;pointer-events:none;
+  background:radial-gradient(125% 100% at 50% 45%, transparent 62%, rgba(0,0,10,.42) 100%)}
+#flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none}
+#fade{position:fixed;inset:0;background:#04070d;opacity:1;pointer-events:none;transition:opacity .5s ease}
+</style>
+</head>
+<body>
+<canvas id="game-canvas"></canvas>
+<div id="vignette-edge"></div>
+
+<div id="ui">
+  <!-- HUD -->
+  <div id="hud">
+    <div id="scoreboard">
+      <div class="sb-chip" id="sb-home"><div class="dot"></div><div class="ab">HOM</div></div>
+      <div id="sb-mid"><div class="sc" id="sb-s0">0</div><div class="dash">–</div><div class="sc" id="sb-s1">0</div></div>
+      <div class="sb-chip right" id="sb-away"><div class="ab">AWY</div><div class="dot"></div></div>
+      <div id="sb-clockwrap"><div id="sb-clock">00:00</div><div id="sb-half">1st half</div></div>
+    </div>
+    <div id="boosts">
+      <div class="bicon" id="boost-p1"></div>
+      <div class="bicon" id="boost-p2"></div>
+    </div>
+    <div id="banner"><div class="big" id="banner-big">GOAL!</div><div class="sub" id="banner-sub"></div></div>
+    <div id="powerwrap"><div id="powerbar"></div></div>
+    <div id="toast"></div>
+    <div id="ctl-hint"></div>
+  </div>
+
+  <!-- TITLE -->
+  <div class="screen dim" id="screen-title">
+    <div id="logo">
+      <div class="big">GOALSTORM</div>
+      <div class="small">Arcade Football League</div>
+    </div>
+    <div id="press">Press Enter or Click</div>
+    <div class="credit">A browser tribute to 90s arcade football &nbsp;·&nbsp; keyboard + gamepad</div>
+  </div>
+
+  <!-- MODE -->
+  <div class="screen dim" id="screen-mode">
+    <div class="panel" style="text-align:center">
+      <div class="htitle">Match Mode</div>
+      <div class="hsub">choose how you want to play</div>
+      <div><button class="btn" id="btn-1p"><span>1P &nbsp;vs&nbsp; CPU</span></button></div>
+      <div><button class="btn alt" id="btn-2p"><span>2P &nbsp;Versus</span></button></div>
+      <div><button class="btn ghost small" id="btn-watch"><span>Watch CPU Demo</span></button></div>
+    </div>
+    <div class="hint">Enter · Select &nbsp;&nbsp; Esc · Back</div>
+  </div>
+
+  <!-- DIFFICULTY -->
+  <div class="screen dim" id="screen-diff">
+    <div class="panel" style="text-align:center">
+      <div class="htitle">Difficulty</div>
+      <div class="hsub">opponent skill level</div>
+      <div><button class="btn" data-diff="easy"><span>Rookie</span></button></div>
+      <div><button class="btn alt" data-diff="pro"><span>Pro</span></button></div>
+      <div><button class="btn ghost" data-diff="legend"><span>Legend</span></button></div>
+    </div>
+  </div>
+
+  <!-- TEAM SELECT -->
+  <div class="screen dim" id="screen-team">
+    <div class="panel" style="text-align:center">
+      <div class="htitle">Team Select</div>
+      <div id="pick-label"></div>
+      <div id="team-grid"></div>
+    </div>
+  </div>
+
+  <!-- PAUSE -->
+  <div class="screen dim" id="screen-pause">
+    <div class="panel" style="text-align:center">
+      <div class="htitle">Paused</div>
+      <div class="hsub">goalstorm league</div>
+      <div class="prow"><div class="lab">Quality</div>
+        <div class="seg" id="seg-quality">
+          <button data-q="low">Low</button><button data-q="med">Med</button><button data-q="high" class="on">High</button>
+        </div>
+      </div>
+      <div class="prow"><div class="lab">Sound</div>
+        <div class="seg" id="seg-sound"><button data-s="on" class="on">On</button><button data-s="off">Off</button></div>
+      </div>
+      <div style="margin-top:18px">
+        <button class="btn small" id="btn-resume"><span>Resume</span></button>
+        <button class="btn ghost small" id="btn-quit"><span>Quit Match</span></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- FULL TIME -->
+  <div class="screen dim" id="screen-ft">
+    <div class="panel" style="text-align:center">
+      <div class="htitle" style="color:var(--accent2)">Full Time</div>
+      <div id="ft-score">0 – 0</div>
+      <div id="ft-result">Draw</div>
+      <div id="ft-stats"></div>
+      <div>
+        <button class="btn small" id="btn-rematch"><span>Rematch</span></button>
+        <button class="btn ghost small" id="btn-menu"><span>Main Menu</span></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="flash"></div>
+<div id="fade"></div>
+
+<script src="vendor/three.min.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/input.js"></script>
+<script src="js/gfx.js"></script>
+<script src="js/stadium.js"></script>
+<script src="js/player.js"></script>
+<script src="js/ball.js"></script>
+<script src="js/ai.js"></script>
+<script src="js/match.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
