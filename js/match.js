@@ -61,6 +61,7 @@ window.GS = window.GS || {};
       this.camBall = new THREE.Vector3();
       this.camLook = new THREE.Vector3();
       this.camPos = new THREE.Vector3();
+      this.camDist = 31;
 
       this.boostTimer = 16;
       this.boostOrb = null;
@@ -709,29 +710,42 @@ window.GS = window.GS || {};
     shake(a) { this.shakeAmt = Math.min(this.shakeAmt + a, 1.6); }
 
     _updateCamera(dt, instant) {
-      // broadcast side view that pans with the ball
-      const focusX = this.ball.controlledBy ? this.ball.controlledBy.pos.x : this.ball.pos.x;
-      const focusZ = this.ball.controlledBy ? this.ball.controlledBy.pos.z : this.ball.pos.z;
-      this.camBall.x = U.damp(this.camBall.x, focusX, instant ? 999 : 3.2, dt);
-      this.camBall.z = U.damp(this.camBall.z, focusZ, instant ? 999 : 2.4, dt);
+      // close, angled chase cam that follows the ball across the whole pitch
+      const ball = this.ball;
+      const fx = ball.controlledBy ? ball.controlledBy.pos.x : ball.pos.x;
+      const fz = ball.controlledBy ? ball.controlledBy.pos.z : ball.pos.z;
+      // lead the camera in the direction the ball is travelling
+      const leadX = U.clamp(ball.vel.x * 0.16, -6, 6);
+      const leadZ = U.clamp(ball.vel.z * 0.12, -4, 4);
+      const k = instant ? 999 : 3.4;
+      this.camBall.x = U.damp(this.camBall.x, fx + leadX, k, dt);
+      this.camBall.z = U.damp(this.camBall.z, U.clamp(fz + leadZ, -C.PITCH_H / 2 + 2, C.PITCH_H / 2 - 2), k * 0.8, dt);
 
-      const speedZoom = U.clamp(this.ball.speed() * 0.25, 0, 6);
-      const camX = this.camBall.x * 0.72;
-      const camY = 23 + speedZoom * 0.4;
-      const camZ = C.PITCH_H / 2 + 24 + speedZoom;
+      // dynamic zoom: pull back when the ball is fast
+      const sp = ball.speed();
+      const want = 30 + U.clamp(sp * 0.45, 0, 11);
+      this.camDist = U.damp(this.camDist || 31, want, 2, dt);
+      const dist = this.camDist;
+
+      // ~38° downward, sitting behind the play on +z — keeps a consistent
+      // orientation (good for 2P) while still feeling like a chase cam
+      const camX = this.camBall.x * 0.96;
+      const camY = dist * 0.62;
+      const camZ = this.camBall.z + dist * 0.82;
       this.camPos.set(camX, camY, camZ);
-      this.camLook.set(this.camBall.x * 0.85, 1.5, this.camBall.z * 0.5);
+      this.camLook.set(this.camBall.x, 1.1, this.camBall.z - dist * 0.16);
 
       // shake
       if (this.shakeAmt > 0.001) {
         const s = this.shakeAmt;
         this.camPos.x += U.rand(-1, 1) * s;
         this.camPos.y += U.rand(-1, 1) * s * 0.6;
+        this.camPos.z += U.rand(-1, 1) * s * 0.4;
         this.camLook.x += U.rand(-1, 1) * s * 0.5;
         this.shakeAmt = Math.max(0, this.shakeAmt - dt * 2.4);
       }
 
-      this.camera.position.lerp(this.camPos, instant ? 1 : U.clamp(dt * 6, 0, 1));
+      this.camera.position.lerp(this.camPos, instant ? 1 : U.clamp(dt * 7, 0, 1));
       this.camera.lookAt(this.camLook);
     }
 

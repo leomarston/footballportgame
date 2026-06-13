@@ -326,10 +326,10 @@ window.GS = window.GS || {};
 
     _lights() {
       const sunDir = GS.SUN_DIR;
-      const hemi = new THREE.HemisphereLight(0xbfd9ff, 0x3f7a3f, 0.62);
+      const hemi = new THREE.HemisphereLight(0xbfd9ff, 0x3f7a3f, 0.5);
       this.scene.add(hemi);
 
-      const sun = new THREE.DirectionalLight(0xfff1d2, 1.32);
+      const sun = new THREE.DirectionalLight(0xfff0cc, 1.7);
       sun.position.copy(sunDir).multiplyScalar(150);
       sun.castShadow = true;
       sun.shadow.mapSize.set(2048, 2048);
@@ -342,9 +342,14 @@ window.GS = window.GS || {};
       this.scene.add(sun.target);
       this.sun = sun;
 
-      const fill = new THREE.DirectionalLight(0x8eb8e8, 0.28);
+      const fill = new THREE.DirectionalLight(0x8eb8e8, 0.22);
       fill.position.set(-sunDir.x * 100, 60, -sunDir.z * 100);
       this.scene.add(fill);
+
+      // cool rim/back light so cel-shaded silhouettes pop off the pitch
+      const rim = new THREE.DirectionalLight(0xbfe4ff, 0.6);
+      rim.position.set(sunDir.x * -120, 70, -160);
+      this.scene.add(rim);
 
       this.gfx.onShadowQuality = (q) => {
         const size = q === 'high' ? 2048 : 1024;
@@ -397,12 +402,13 @@ window.GS = window.GS || {};
       for (const s of [-1, 1]) {
         const g = new THREE.Group();
         const post = (x, y, z, h, r, rotZ, rotX) => {
-          const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 10), postMat);
+          const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 12), postMat);
           m.position.set(x, y, z);
           if (rotZ) m.rotation.z = rotZ;
           if (rotX) m.rotation.x = rotX;
           m.castShadow = true;
           g.add(m);
+          GS.addOutline(m);
           return m;
         };
         const gx = s * W2;
@@ -436,7 +442,7 @@ window.GS = window.GS || {};
     }
 
     static toon() {
-      if (!Stadium._toonTex) Stadium._toonTex = U.toonGradient([0.42, 0.66, 0.88, 1]);
+      if (!Stadium._toonTex) Stadium._toonTex = U.toonGradient([0.4, 0.72, 1.0]);
       return Stadium._toonTex;
     }
 

@@ -55,30 +55,40 @@ window.GS = window.GS || {};
     float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
     void main(){
-      vec3 c = texture2D(tScene, vUv).rgb;
+      vec2 d = vUv - 0.5;
+      float r2 = dot(d, d);
+
+      // chromatic aberration that grows toward the edges (lens feel)
+      vec2 ca = d * r2 * 0.020;
+      vec3 c;
+      c.r = texture2D(tScene, vUv - ca).r;
+      c.g = texture2D(tScene, vUv).g;
+      c.b = texture2D(tScene, vUv + ca).b;
+
       vec3 b = texture2D(tBloom, vUv).rgb;
       c += b * uBloom;
 
-      // gentle filmic-ish lift on shadows + contrast
-      c = c * 1.04 - 0.012;
+      // punchy contrast S-curve + gain
       c = clamp(c, 0.0, 1.0);
-      c = c * c * (3.0 - 2.0 * c) * 0.22 + c * 0.78;
+      c = mix(c, c * c * (3.0 - 2.0 * c), 0.45);
+      c = (c - 0.5) * 1.14 + 0.5 + 0.006;
 
       // saturation
       float l = dot(c, vec3(0.299, 0.587, 0.114));
       c = mix(vec3(l), c, uSat);
 
-      // subtle warm/cool split tone (sunny stadium feel)
-      c += vec3(0.015, 0.006, -0.012) * (1.0 - l);
+      // warm highlights / cool shadows split tone (sunny stadium pop)
+      c += vec3(0.022, 0.009, -0.020) * (1.0 - l);
+      c += vec3(-0.010, 0.0, 0.020) * l * 0.4;
 
-      // vignette
-      vec2 d = vUv - 0.5;
-      float vig = 1.0 - dot(d, d) * uVignette;
-      c *= clamp(vig, 0.0, 1.0);
+      // strong rounded vignette
+      float vig = smoothstep(1.05, 0.18, r2 * uVignette);
+      c *= mix(0.5, 1.0, vig);
 
-      // film grain (very subtle)
+      // faint scanline + film grain for a clean retro-broadcast finish
+      c *= 1.0 - 0.025 * (0.5 + 0.5 * sin(vUv.y * 1400.0));
       float g = hash(vUv * vec2(1920.0, 1080.0) + fract(uTime) * 7.13) - 0.5;
-      c += g * 0.018;
+      c += g * 0.020;
 
       // linear -> sRGB
       c = clamp(c, 0.0, 1.0);
@@ -488,15 +498,15 @@ window.GS = window.GS || {};
       });
 
       this.matBright = mk(BRIGHT_FRAG, {
-        tInput: { value: null }, uThreshold: { value: 0.72 },
+        tInput: { value: null }, uThreshold: { value: 0.58 },
       });
       this.matBlur = mk(BLUR_FRAG, {
         tInput: { value: null }, uDir: { value: new THREE.Vector2(0, 0) },
       });
       this.matComp = mk(COMP_FRAG, {
         tScene: { value: null }, tBloom: { value: null },
-        uBloom: { value: 0.85 }, uTime: { value: 0 },
-        uVignette: { value: 0.95 }, uSat: { value: 1.12 },
+        uBloom: { value: 1.05 }, uTime: { value: 0 },
+        uVignette: { value: 1.15 }, uSat: { value: 1.28 },
       });
       this.matFxaa = mk(FXAA_FRAG, {
         tInput: { value: null }, uTexel: { value: new THREE.Vector2(1 / 1920, 1 / 1080) },
@@ -584,6 +594,49 @@ window.GS = window.GS || {};
       r.render(this._fsScene, this._fsCam);
     }
   }
+
+  // ----------------------------------------------------------------------
+  // Toon outline (inverted hull) — the signature "cel-shaded Unity" edge.
+  // Adds a back-face shell, expanded along normals, drawn solid dark. Added
+  // as a child of the source mesh so it follows all animation automatically.
+  // ----------------------------------------------------------------------
+  let OUTLINE_MAT = null;
+  function outlineMat() {
+    if (OUTLINE_MAT) return OUTLINE_MAT;
+    OUTLINE_MAT = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      fog: false,
+      uniforms: {
+        uColor: { value: new THREE.Color(0x0a0e16) },
+        uThickness: { value: 1.7 },
+      },
+      vertexShader: `
+        uniform float uThickness;
+        void main(){
+          vec3 n = normalize(normalMatrix * normal);
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          // expand in view space, scaled by depth for ~constant screen width
+          mv.xyz += n * uThickness * (-mv.z) * 0.009;
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: `
+        uniform vec3 uColor;
+        void main(){ gl_FragColor = vec4(uColor, 1.0); }`,
+    });
+    return OUTLINE_MAT;
+  }
+
+  GS.addOutline = function (mesh, thickness) {
+    if (!mesh || !mesh.geometry) return null;
+    const mat = thickness ? outlineMat().clone() : outlineMat();
+    if (thickness) { mat.uniforms.uThickness.value = thickness; }
+    const o = new THREE.Mesh(mesh.geometry, mat);
+    o.castShadow = false; o.receiveShadow = false;
+    o.frustumCulled = mesh.frustumCulled;
+    o.renderOrder = (mesh.renderOrder || 0) - 1;
+    mesh.add(o);
+    return o;
+  };
 
   GS.Gfx = Gfx;
   GS.Particles = Particles;

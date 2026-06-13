@@ -9,7 +9,7 @@ window.GS = window.GS || {};
   const U = GS.U, C = GS.CFG;
 
   let TOON = null;
-  function toon() { if (!TOON) TOON = U.toonGradient([0.45, 0.68, 0.88, 1]); return TOON; }
+  function toon() { if (!TOON) TOON = U.toonGradient([0.42, 0.74, 1.0]); return TOON; }
 
   // shared per-team material cache
   const KIT_CACHE = {};
@@ -50,6 +50,7 @@ window.GS = window.GS || {};
     seg.position.y = -len / 2;
     seg.castShadow = true;
     pivot.add(seg);
+    GS.addOutline(seg);
     const cap = new THREE.Mesh(new THREE.SphereGeometry(rBot, 8, 6), mat);
     cap.position.y = -len;
     pivot.add(cap);
@@ -115,6 +116,7 @@ window.GS = window.GS || {};
       torso.position.y = 0.31;
       torso.castShadow = true;
       body.add(torso);
+      GS.addOutline(torso);
       this.parts.torso = torso;
 
       // chest shoulder yoke (trim color collar)
@@ -150,17 +152,19 @@ window.GS = window.GS || {};
       headG.position.y = 0.82;
       body.add(headG);
       this.parts.head = headG;
-      const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 14, 12), skinMat);
-      head.scale.set(1, 1.12, 1.02);
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.215, 16, 13), skinMat);
+      head.scale.set(1, 1.1, 1.02);
       head.castShadow = true;
       headG.add(head);
+      GS.addOutline(head);
 
       // hair cap
       const hairMat = new THREE.MeshToonMaterial({ color: new THREE.Color(this._hair), gradientMap: toon() });
-      const hair = new THREE.Mesh(new THREE.SphereGeometry(0.185, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.62), hairMat);
+      const hair = new THREE.Mesh(new THREE.SphereGeometry(0.222, 14, 11, 0, Math.PI * 2, 0, Math.PI * 0.64), hairMat);
       hair.position.y = 0.04;
-      hair.scale.set(1.04, 1.1, 1.06);
+      hair.scale.set(1.04, 1.12, 1.06);
       headG.add(hair);
+      GS.addOutline(hair);
       // nose nub for facing readability
       const nose = new THREE.Mesh(new THREE.SphereGeometry(0.035, 6, 6), skinMat);
       nose.position.set(0.17, -0.01, 0);
@@ -198,10 +202,11 @@ window.GS = window.GS || {};
       // boots
       for (const side of ['L', 'R']) {
         const shin = this.parts['shin' + side];
-        const boot = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.1, 0.28), kit.shoe);
+        const boot = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.11, 0.3), kit.shoe);
         boot.position.set(0, -0.4, 0.07);
         boot.castShadow = true;
         shin.pivot.add(boot);
+        GS.addOutline(boot);
       }
 
       // shorts block over hips

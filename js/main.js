@@ -25,7 +25,7 @@
   // ---------- engine ----------
   const gfx = new GS.Gfx(canvas);
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(46, window.innerWidth / window.innerHeight, 0.5, 1200);
+  const camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.5, 1200);
   camera.position.set(0, 40, 60);
   camera.lookAt(0, 0, 0);
   const particles = new GS.Particles(scene);
