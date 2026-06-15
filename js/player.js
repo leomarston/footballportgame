@@ -227,13 +227,8 @@ window.GS = window.GS || {};
         }
       }
 
-      // contact shadow + selection ring
-      const shTex = U.glowTexture('rgba(0,0,0,0.6)', 'rgba(0,0,0,0.22)');
-      const shadow = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.74),
-        new THREE.MeshBasicMaterial({ map: shTex, transparent: true, depthWrite: false, opacity: 0.65 }));
-      shadow.rotation.x = -PI / 2; shadow.position.y = 0.02;
-      root.add(shadow); this.contactShadow = shadow;
-
+      // selection ring (real directional sun shadow handles grounding)
+      this.contactShadow = null;
       const ring = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 1.6),
         new THREE.MeshBasicMaterial({ map: ringTexture(), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
       ring.rotation.x = -PI / 2; ring.position.y = 0.05; ring.visible = false;
