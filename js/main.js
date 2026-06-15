@@ -4,6 +4,10 @@
 (function () {
   'use strict';
   const GS = window.GS, U = GS.U;
+  const BUILD = 'v6';
+  console.log('%cGOALSTORM build ' + BUILD, 'color:#27e07f;font-weight:bold');
+  const buildEl = document.getElementById('build');
+  if (buildEl) buildEl.textContent = 'BUILD ' + BUILD;
 
   // ---------- DOM ----------
   const $ = (id) => document.getElementById(id);
