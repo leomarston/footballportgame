@@ -46,13 +46,24 @@ window.GS = window.GS || {};
   const COMP_FRAG = `
     uniform sampler2D tScene;
     uniform sampler2D tBloom;
+    uniform sampler2D tDepth;
     uniform float uBloom;
     uniform float uTime;
     uniform float uVignette;
     uniform float uSat;
+    uniform float uNear;
+    uniform float uFar;
+    uniform float uOutline;
+    uniform vec2 uTexel;
     varying vec2 vUv;
 
     float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+    // linear eye-space depth from the depth buffer
+    float eyeDepth(vec2 uv){
+      float z = texture2D(tDepth, uv).x * 2.0 - 1.0;
+      return (2.0 * uNear * uFar) / (uFar + uNear - z * (uFar - uNear));
+    }
 
     void main(){
       vec2 d = vUv - 0.5;
@@ -80,6 +91,20 @@ window.GS = window.GS || {};
       // warm highlights / cool shadows split tone (sunny stadium pop)
       c += vec3(0.022, 0.009, -0.020) * (1.0 - l);
       c += vec3(-0.010, 0.0, 0.020) * l * 0.4;
+
+      // ---- screen-space depth-edge outline (clean cel silhouette) ----
+      // Replaces per-part hull shells: one constant-width edge on real depth
+      // discontinuities, so it can never pile up into black blobs.
+      float dc = eyeDepth(vUv);
+      vec2 o = uTexel * 1.4;
+      float dl = eyeDepth(vUv + vec2(-o.x, 0.0));
+      float dr = eyeDepth(vUv + vec2( o.x, 0.0));
+      float du = eyeDepth(vUv + vec2(0.0, -o.y));
+      float dd = eyeDepth(vUv + vec2(0.0,  o.y));
+      float diff = abs(dc - dl) + abs(dc - dr) + abs(dc - du) + abs(dc - dd);
+      float edge = smoothstep(0.012, 0.05, diff / dc);   // relative to depth
+      edge *= step(dc, uFar * 0.5);                       // ignore far scenery
+      c = mix(c, vec3(0.03, 0.045, 0.07), edge * uOutline);
 
       // strong rounded vignette
       float vig = smoothstep(1.05, 0.18, r2 * uVignette);
@@ -504,9 +529,11 @@ window.GS = window.GS || {};
         tInput: { value: null }, uDir: { value: new THREE.Vector2(0, 0) },
       });
       this.matComp = mk(COMP_FRAG, {
-        tScene: { value: null }, tBloom: { value: null },
+        tScene: { value: null }, tBloom: { value: null }, tDepth: { value: null },
         uBloom: { value: 1.05 }, uTime: { value: 0 },
         uVignette: { value: 1.15 }, uSat: { value: 1.28 },
+        uNear: { value: 0.5 }, uFar: { value: 1200 },
+        uOutline: { value: 0.9 }, uTexel: { value: new THREE.Vector2(1 / 1920, 1 / 1080) },
       });
       this.matFxaa = mk(FXAA_FRAG, {
         tInput: { value: null }, uTexel: { value: new THREE.Vector2(1 / 1920, 1 / 1080) },
@@ -526,6 +553,7 @@ window.GS = window.GS || {};
       this.renderer.setSize(w, h, false);
       const pw = Math.floor(w * this.pixelRatio), ph = Math.floor(h * this.pixelRatio);
       if (this.rtScene) {
+        if (this.rtScene.depthTexture) this.rtScene.depthTexture.dispose();
         this.rtScene.dispose(); this.rtBright.dispose();
         this.rtBlurA.dispose(); this.rtBlurB.dispose(); this.rtComp.dispose();
       }
@@ -533,11 +561,18 @@ window.GS = window.GS || {};
         minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat, depthBuffer: true, stencilBuffer: false,
       });
+      // depth texture so the composite can detect silhouette edges
+      const depthTex = new THREE.DepthTexture(pw, ph);
+      depthTex.type = THREE.UnsignedIntType;
+      depthTex.minFilter = THREE.NearestFilter;
+      depthTex.magFilter = THREE.NearestFilter;
+      this.rtScene.depthTexture = depthTex;
       this.rtBright = this._rt(pw >> 1, ph >> 1);
       this.rtBlurA = this._rt(pw >> 2, ph >> 2);
       this.rtBlurB = this._rt(pw >> 2, ph >> 2);
       this.rtComp = this._rt(pw, ph);
       this.matFxaa.uniforms.uTexel.value.set(1 / pw, 1 / ph);
+      this.matComp.uniforms.uTexel.value.set(1 / pw, 1 / ph);
       this.w = w; this.h = h;
     }
 
@@ -583,6 +618,9 @@ window.GS = window.GS || {};
       // 3) composite
       this._fsMesh.material = this.matComp;
       this.matComp.uniforms.tScene.value = this.rtScene.texture;
+      this.matComp.uniforms.tDepth.value = this.rtScene.depthTexture;
+      this.matComp.uniforms.uNear.value = camera.near;
+      this.matComp.uniforms.uFar.value = camera.far;
       this.matComp.uniforms.uTime.value = this.time;
       r.setRenderTarget(this.rtComp);
       r.render(this._fsScene, this._fsCam);
@@ -595,59 +633,12 @@ window.GS = window.GS || {};
     }
   }
 
-  // ----------------------------------------------------------------------
-  // Toon outline (inverted hull) — the signature "cel-shaded Unity" edge.
-  // Back-face shell expanded along normals by a fixed WORLD-space amount that
-  // is proportional to the part's size, so the edge stays a clean, constant
-  // fraction of each object at any camera distance (no fat black blobs when
-  // the camera pulls back). Added as a child so it follows all animation.
-  // ----------------------------------------------------------------------
-  let OUTLINE_PROTO = null;
-  function outlineProto() {
-    if (OUTLINE_PROTO) return OUTLINE_PROTO;
-    OUTLINE_PROTO = new THREE.ShaderMaterial({
-      side: THREE.BackSide,
-      fog: false,
-      uniforms: {
-        uColor: { value: new THREE.Color(0x0b0f18) },
-        uExpand: { value: 0.02 },   // world-space thickness, set per mesh
-      },
-      vertexShader: `
-        uniform float uExpand;
-        void main(){
-          vec3 n = normalize(normalMatrix * normal);
-          vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          mv.xyz += n * uExpand;       // constant world-space offset
-          gl_Position = projectionMatrix * mv;
-        }`,
-      fragmentShader: `
-        uniform vec3 uColor;
-        void main(){ gl_FragColor = vec4(uColor, 1.0); }`,
-    });
-    return OUTLINE_PROTO;
-  }
-
-  // k = outline thickness as a fraction of the part's CROSS-SECTION (not its
-  // length). Using the bounding-sphere radius blew up for long thin cylinders
-  // (goal posts/crossbar got a huge black shell). We instead take the median
-  // bounding-box extent — the small cross-axis for a limb/post — so every
-  // part gets a proportional, capped edge that never becomes a black bar.
-  GS.addOutline = function (mesh, k) {
-    if (!mesh || !mesh.geometry) return null;
-    const geo = mesh.geometry;
-    if (!geo.boundingBox) geo.computeBoundingBox();
-    const bb = geo.boundingBox;
-    const dims = [bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z].sort((a, b) => a - b);
-    const cross = dims[1] * 0.5;                       // half the median extent
-    const expand = U.clamp(cross * (k || 0.2), 0.006, 0.05);
-    const mat = outlineProto().clone();
-    mat.uniforms.uExpand.value = expand;
-    const o = new THREE.Mesh(geo, mat);
-    o.castShadow = false; o.receiveShadow = false;
-    o.frustumCulled = mesh.frustumCulled;
-    mesh.add(o);
-    return o;
-  };
+  // Outlines are now done as a single screen-space depth-edge pass in the
+  // composite shader (see COMP_FRAG), which gives one clean constant-width
+  // silhouette edge instead of stacking per-part inverted-hull shells that
+  // merged into black blobs around multi-part characters. This is kept as a
+  // no-op so existing call sites stay valid.
+  GS.addOutline = function () { return null; };
 
   GS.Gfx = Gfx;
   GS.Particles = Particles;
