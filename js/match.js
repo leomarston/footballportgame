@@ -232,20 +232,34 @@ window.GS = window.GS || {};
       this.humanSet.clear();
       for (const ht of this.humanTeams) {
         const team = this.teams[ht.teamId];
+        const ctl = this.control[ht.teamId];
         let active;
-        if (this.ball.controlledBy && this.ball.controlledBy.teamId === team.id && !this.ball.controlledBy.isGK) {
-          active = this.ball.controlledBy;
+        const carrier = this.ball.controlledBy;
+        if (carrier && carrier.teamId === team.id && !carrier.isGK) {
+          // always control whoever has the ball
+          active = carrier;
         } else {
-          // nearest outfield player to ball
+          // nearest outfield player to the ball, but with STICKINESS so control
+          // doesn't flicker between players every frame (the main "I'm not
+          // controlling them" bug). Keep the current player unless another is
+          // clearly closer to the ball.
           let best = null, bd = 1e9;
           for (const p of team.players) {
-            if (p.isGK) continue;
+            if (p.isGK || p.fallTimer > 0) continue;
             const d = U.dist2D(p.pos, this.ball.pos);
             if (d < bd) { bd = d; best = p; }
           }
-          active = best;
+          const cur = ctl.active;
+          const curOk = cur && !cur.isGK && cur.fallTimer <= 0 && team.players.indexOf(cur) >= 0;
+          if (curOk) {
+            const curD = U.dist2D(cur.pos, this.ball.pos);
+            const margin = (cur.input && (cur.input.x || cur.input.z)) ? 4.5 : 3.0; // harder to switch mid-run
+            active = (best && bd < curD - margin) ? best : cur;
+          } else {
+            active = best;
+          }
         }
-        this.control[ht.teamId].active = active;
+        ctl.active = active;
         if (active) this.humanSet.add(active);
         // selection ring
         for (const p of team.players) p.setSelected(p === active && this.state !== 'fulltime', team.id === 0 ? '#27e07f' : '#ff4d6d');

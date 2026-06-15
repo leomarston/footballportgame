@@ -113,8 +113,8 @@ window.GS = window.GS || {};
       this.facing = this.attackDir > 0 ? 0 : PI;
       this.input = { x: 0, z: 0, sprint: false };
       this.maxSpeed = (this.isGK ? 7.6 : 8.7) * (opts.speedMul || 1);
-      this.accel = 36;          // m/s^2 toward desired velocity
-      this.decel = 26;          // m/s^2 friction when no input
+      this.accel = 62;          // m/s^2 toward desired velocity (snappy arcade)
+      this.decel = 50;          // m/s^2 friction when no input
       this.speedFrac = 0;
       this.attr = opts.attr || { speed: 1, react: 0.12, shootAcc: 0.85, pass: 0.9 };
 

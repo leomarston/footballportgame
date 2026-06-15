@@ -454,7 +454,9 @@ window.GS = window.GS || {};
 
       this.quality = 'high';
       this.bloomOn = true;
-      this.pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      // cap render resolution: on hi-DPI screens drawing at 2x means 4x the
+      // pixels, which tanks the frame rate and makes play feel choppy
+      this.pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
 
       this._buildPost();
       this._resize();
@@ -465,11 +467,11 @@ window.GS = window.GS || {};
     setQuality(q) {
       this.quality = q;
       if (q === 'high') {
-        this.pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+        this.pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
         this.bloomOn = true;
         this.renderer.shadowMap.enabled = true;
       } else if (q === 'med') {
-        this.pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+        this.pixelRatio = Math.min(window.devicePixelRatio || 1, 1.25);
         this.bloomOn = true;
         this.renderer.shadowMap.enabled = true;
       } else {
