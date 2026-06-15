@@ -4,7 +4,7 @@
 (function () {
   'use strict';
   const GS = window.GS, U = GS.U;
-  const BUILD = 'v8';
+  const BUILD = 'v9';
   console.log('%cGOALSTORM build ' + BUILD, 'color:#27e07f;font-weight:bold');
   const buildEl = document.getElementById('build');
   if (buildEl) buildEl.textContent = 'BUILD ' + BUILD;

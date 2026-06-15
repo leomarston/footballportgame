@@ -465,7 +465,9 @@ window.GS = window.GS || {};
         const fx = sx * 31, fz = sz * 22;
         stands.push({ fx, fz, ang: c(fx, fz), len: 30, steps: 12, homeBias: 0.5, kind: 'corner' });
       }
-      stands.forEach(s => { s.stepBack = SB; s.stepUp = SU; s.baseY = BY; });
+      // camera sits on the +z side, so leave those stands roofless to keep the
+      // elevated chase view clear (long +z stand and the two +z corners)
+      stands.forEach(s => { s.stepBack = SB; s.stepUp = SU; s.baseY = BY; s.noRoof = s.fz > 0.5; });
 
       const mats = {
         a: new THREE.MeshLambertMaterial({ color: 0x9aa6b5 }),
@@ -505,16 +507,19 @@ window.GS = window.GS || {};
         const vom = new THREE.Mesh(new THREE.BoxGeometry(3.2, 3.4, 0.7), m.dark);
         vom.position.set(k * len * 0.26, 1.9, depth * 0.55); g.add(vom);
       }
-      // cantilever roof + bright leading edge + columns
-      const roof = new THREE.Mesh(new THREE.BoxGeometry(len + 4, 0.5, depth + 5.5), m.roof);
-      roof.position.set(0, wallH + 2.0, depth / 2 - 0.5); roof.rotation.x = -0.1; g.add(roof);
-      const redge = new THREE.Mesh(new THREE.BoxGeometry(len + 4, 0.45, 0.5), m.edge);
-      redge.position.set(0, wallH + 1.45, -1.9); g.add(redge);
-      const underside = new THREE.Mesh(new THREE.BoxGeometry(len + 3, 0.2, depth + 4), m.dark);
-      underside.position.set(0, wallH + 1.7, depth / 2 - 0.5); underside.rotation.x = -0.1; g.add(underside);
-      for (let cI = -1; cI <= 1; cI++) {
-        const col = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.34, wallH + 2, 8), m.b);
-        col.position.set(cI * (len / 2 - 2), (wallH + 2) / 2, depth + 0.3); g.add(col);
+      // cantilever roof + bright leading edge + columns (skipped on the
+      // camera-side stands so the elevated camera view isn't blocked)
+      if (!st.noRoof) {
+        const roof = new THREE.Mesh(new THREE.BoxGeometry(len + 4, 0.5, depth + 5.5), m.roof);
+        roof.position.set(0, wallH + 2.0, depth / 2 - 0.5); roof.rotation.x = -0.1; g.add(roof);
+        const redge = new THREE.Mesh(new THREE.BoxGeometry(len + 4, 0.45, 0.5), m.edge);
+        redge.position.set(0, wallH + 1.45, -1.9); g.add(redge);
+        const underside = new THREE.Mesh(new THREE.BoxGeometry(len + 3, 0.2, depth + 4), m.dark);
+        underside.position.set(0, wallH + 1.7, depth / 2 - 0.5); underside.rotation.x = -0.1; g.add(underside);
+        for (let cI = -1; cI <= 1; cI++) {
+          const col = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.34, wallH + 2, 8), m.b);
+          col.position.set(cI * (len / 2 - 2), (wallH + 2) / 2, depth + 0.3); g.add(col);
+        }
       }
       g.position.set(st.fx, 0, st.fz);
       g.rotation.y = -st.ang - Math.PI / 2;
