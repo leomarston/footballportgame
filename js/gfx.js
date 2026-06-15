@@ -627,14 +627,21 @@ window.GS = window.GS || {};
     return OUTLINE_PROTO;
   }
 
-  // k = outline thickness as a fraction of the part's radius (default ~5%).
+  // k = outline thickness as a fraction of the part's CROSS-SECTION (not its
+  // length). Using the bounding-sphere radius blew up for long thin cylinders
+  // (goal posts/crossbar got a huge black shell). We instead take the median
+  // bounding-box extent — the small cross-axis for a limb/post — so every
+  // part gets a proportional, capped edge that never becomes a black bar.
   GS.addOutline = function (mesh, k) {
     if (!mesh || !mesh.geometry) return null;
     const geo = mesh.geometry;
-    if (!geo.boundingSphere) geo.computeBoundingSphere();
-    const r = (geo.boundingSphere && geo.boundingSphere.radius) || 0.3;
+    if (!geo.boundingBox) geo.computeBoundingBox();
+    const bb = geo.boundingBox;
+    const dims = [bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z].sort((a, b) => a - b);
+    const cross = dims[1] * 0.5;                       // half the median extent
+    const expand = U.clamp(cross * (k || 0.2), 0.006, 0.05);
     const mat = outlineProto().clone();
-    mat.uniforms.uExpand.value = r * (k || 0.055);
+    mat.uniforms.uExpand.value = expand;
     const o = new THREE.Mesh(geo, mat);
     o.castShadow = false; o.receiveShadow = false;
     o.frustumCulled = mesh.frustumCulled;
