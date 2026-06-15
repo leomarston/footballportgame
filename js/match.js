@@ -773,19 +773,22 @@ window.GS = window.GS || {};
       this.camBall.x = U.damp(this.camBall.x, fx + leadX, k, dt);
       this.camBall.z = U.damp(this.camBall.z, U.clamp(fz + leadZ, -C.PITCH_H / 2 + 2, C.PITCH_H / 2 - 2), k * 0.8, dt);
 
-      // dynamic zoom: pull back when the ball is fast
+      // dynamic zoom: pull the sideline cam back a little when the ball is fast
       const sp = ball.speed();
-      const want = 30 + U.clamp(sp * 0.45, 0, 11);
-      this.camDist = U.damp(this.camDist || 31, want, 2, dt);
+      const want = 30 + U.clamp(sp * 0.5, 0, 12);
+      this.camDist = U.damp(this.camDist || 30, want, 2, dt);
       const dist = this.camDist;
 
-      // ~38° downward, sitting behind the play on +z — keeps a consistent
-      // orientation (good for 2P) while still feeling like a chase cam
-      const camX = this.camBall.x * 0.96;
-      const camY = dist * 0.62;
-      const camZ = this.camBall.z + dist * 0.82;
+      // Broadcast camera: fixed on the +z sideline, panning in X with the ball.
+      // It sits UNDER the stand roof (roofs are ~14-15 high) and never moves
+      // behind the near stand, so the roof can't block the pitch.
+      const ROOF_CLEAR = 11.5;                 // camera height, below the roofline
+      const camX = this.camBall.x * 0.9;
+      const camY = ROOF_CLEAR;
+      const camZ = C.PITCH_H / 2 + dist * 0.5; // ~26-32, just inside the +z stand
       this.camPos.set(camX, camY, camZ);
-      this.camLook.set(this.camBall.x, 1.1, this.camBall.z - dist * 0.16);
+      // look at the ball, biased a touch toward midfield so the pitch frames well
+      this.camLook.set(this.camBall.x, 1.6, this.camBall.z * 0.5);
 
       // shake
       if (this.shakeAmt > 0.001) {
