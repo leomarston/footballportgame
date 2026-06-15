@@ -597,43 +597,47 @@ window.GS = window.GS || {};
 
   // ----------------------------------------------------------------------
   // Toon outline (inverted hull) — the signature "cel-shaded Unity" edge.
-  // Adds a back-face shell, expanded along normals, drawn solid dark. Added
-  // as a child of the source mesh so it follows all animation automatically.
+  // Back-face shell expanded along normals by a fixed WORLD-space amount that
+  // is proportional to the part's size, so the edge stays a clean, constant
+  // fraction of each object at any camera distance (no fat black blobs when
+  // the camera pulls back). Added as a child so it follows all animation.
   // ----------------------------------------------------------------------
-  let OUTLINE_MAT = null;
-  function outlineMat() {
-    if (OUTLINE_MAT) return OUTLINE_MAT;
-    OUTLINE_MAT = new THREE.ShaderMaterial({
+  let OUTLINE_PROTO = null;
+  function outlineProto() {
+    if (OUTLINE_PROTO) return OUTLINE_PROTO;
+    OUTLINE_PROTO = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       fog: false,
       uniforms: {
-        uColor: { value: new THREE.Color(0x0a0e16) },
-        uThickness: { value: 1.7 },
+        uColor: { value: new THREE.Color(0x0b0f18) },
+        uExpand: { value: 0.02 },   // world-space thickness, set per mesh
       },
       vertexShader: `
-        uniform float uThickness;
+        uniform float uExpand;
         void main(){
           vec3 n = normalize(normalMatrix * normal);
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          // expand in view space, scaled by depth for ~constant screen width
-          mv.xyz += n * uThickness * (-mv.z) * 0.009;
+          mv.xyz += n * uExpand;       // constant world-space offset
           gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: `
         uniform vec3 uColor;
         void main(){ gl_FragColor = vec4(uColor, 1.0); }`,
     });
-    return OUTLINE_MAT;
+    return OUTLINE_PROTO;
   }
 
-  GS.addOutline = function (mesh, thickness) {
+  // k = outline thickness as a fraction of the part's radius (default ~5%).
+  GS.addOutline = function (mesh, k) {
     if (!mesh || !mesh.geometry) return null;
-    const mat = thickness ? outlineMat().clone() : outlineMat();
-    if (thickness) { mat.uniforms.uThickness.value = thickness; }
-    const o = new THREE.Mesh(mesh.geometry, mat);
+    const geo = mesh.geometry;
+    if (!geo.boundingSphere) geo.computeBoundingSphere();
+    const r = (geo.boundingSphere && geo.boundingSphere.radius) || 0.3;
+    const mat = outlineProto().clone();
+    mat.uniforms.uExpand.value = r * (k || 0.055);
+    const o = new THREE.Mesh(geo, mat);
     o.castShadow = false; o.receiveShadow = false;
     o.frustumCulled = mesh.frustumCulled;
-    o.renderOrder = (mesh.renderOrder || 0) - 1;
     mesh.add(o);
     return o;
   };

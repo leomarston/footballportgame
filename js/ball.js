@@ -71,7 +71,7 @@ window.GS = window.GS || {};
       this.mesh.castShadow = true;
       this.mesh.position.copy(this.pos);
       scene.add(this.mesh);
-      GS.addOutline(this.mesh, 2.0);
+      GS.addOutline(this.mesh, 0.085);
 
       // shadow
       const shTex = U.glowTexture('rgba(0,0,0,0.6)', 'rgba(0,0,0,0.25)');
